@@ -7,29 +7,28 @@
 .env.*
 !.env.example
 
-# Backend - Python
+# Backend
 backend/.env
 backend/venv/
 backend/__pycache__/
 backend/*.pyc
-backend/**/*.pyc
 
-# Python cache
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyo
 
 # Virtual environments
 venv/
 .venv/
 env/
 
-# Frontend - Next.js
+# Frontend
 frontend/node_modules/
 frontend/.next/
 frontend/out/
 
-# Next.js environment files
+# Frontend environment files
 frontend/.env
 frontend/.env.local
 frontend/.env.development.local
@@ -42,28 +41,22 @@ npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
 
-# Testing / coverage
+# Testing
 coverage/
 .nyc_output/
 
-# OS generated files
+# OS files
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# IDE / editor files
-.vscode/*
-!.vscode/settings.json
-!.vscode/extensions.json
+# IDE
+.vscode/
 .idea/
+
+# TypeScript build cache
+*.tsbuildinfo
 
 # Temporary files
 *.tmp
 *.temp
-
-# Build files
-dist/
-build/
-
-# TypeScript
-*.tsbuildinfo
