@@ -1,14 +1,26 @@
 -- Phase 3: Authentication + RBAC foundation
--- Safe to run after the profiles table/trigger and incidents table exist.
+-- This migration records the profiles/role and incident ownership schema.
 
-create type public.user_role as enum (
-  'citizen',
-  'responder',
-  'hospital',
-  'shelter',
-  'command_center',
-  'admin'
-);
+-- Create the role enum only when it does not already exist.
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_type
+    where typnamespace = 'public'::regnamespace
+      and typname = 'user_role'
+  ) then
+    create type public.user_role as enum (
+      'citizen',
+      'responder',
+      'hospital',
+      'shelter',
+      'command_center',
+      'admin'
+    );
+  end if;
+end
+$$;
 
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
@@ -27,11 +39,9 @@ for select
 to authenticated
 using (auth.uid() = id);
 
--- Do not grant browser users permission to change their own role.
--- Role changes must be performed by a trusted backend/admin workflow.
-
+-- Browser users must never be able to change their own role.
+-- Role changes belong to a trusted backend/admin workflow.
 grant select on public.profiles to authenticated;
-
 grant select, insert, update, delete on public.profiles to service_role;
 
 create or replace function public.handle_new_user()
