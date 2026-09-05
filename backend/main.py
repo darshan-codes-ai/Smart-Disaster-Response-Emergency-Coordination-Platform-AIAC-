@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from supabase import create_client, Client
@@ -20,14 +20,10 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
 
 if not SUPABASE_URL:
-    raise RuntimeError(
-        "SUPABASE_URL is missing. Check backend/.env"
-    )
+    raise RuntimeError("SUPABASE_URL is missing. Check backend/.env")
 
 if not SUPABASE_SECRET_KEY:
-    raise RuntimeError(
-        "SUPABASE_SECRET_KEY is missing. Check backend/.env"
-    )
+    raise RuntimeError("SUPABASE_SECRET_KEY is missing. Check backend/.env")
 
 
 # ============================================================
@@ -47,7 +43,7 @@ supabase: Client = create_client(
 app = FastAPI(
     title="Smart Disaster Response API",
     description="Backend API for the AIAC Disaster Response Platform",
-    version="1.0.0"
+    version="1.1.0"
 )
 
 
@@ -57,9 +53,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000"
-    ],
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -79,12 +73,7 @@ class IncidentCreate(BaseModel):
     type: str
     description: str
     location: Location
-
-    severity: Optional[int] = Field(
-        default=3,
-        ge=1,
-        le=5
-    )
+    severity: Optional[int] = Field(default=3, ge=1, le=5)
 
 
 class IncidentUpdate(BaseModel):
@@ -93,12 +82,88 @@ class IncidentUpdate(BaseModel):
 
 
 # ============================================================
+# AUTHENTICATION / RBAC
+# ============================================================
+
+
+def get_current_user(authorization: Optional[str] = Header(default=None)):
+    """Verify the Supabase access token and return user + role."""
+
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid Authorization header"
+        )
+
+    token = authorization.split(" ", 1)[1].strip()
+
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing access token"
+        )
+
+    try:
+        auth_response = supabase.auth.get_user(token)
+        user = auth_response.user
+
+        if not user:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired access token"
+            )
+
+        profile_response = (
+            supabase
+            .table("profiles")
+            .select("role, full_name")
+            .eq("id", user.id)
+            .single()
+            .execute()
+        )
+
+        profile = profile_response.data
+
+        if not profile:
+            raise HTTPException(
+                status_code=403,
+                detail="User profile not found"
+            )
+
+        return {
+            "id": user.id,
+            "email": user.email,
+            "role": profile.get("role", "citizen"),
+            "full_name": profile.get("full_name"),
+        }
+
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired access token"
+        )
+
+
+def require_roles(*allowed_roles: str):
+    def role_dependency(current_user=Depends(get_current_user)):
+        if current_user["role"] not in allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail="You do not have permission to perform this action"
+            )
+        return current_user
+
+    return role_dependency
+
+
+# ============================================================
 # ROOT ENDPOINT
 # ============================================================
 
 @app.get("/")
 def root():
-
     return {
         "message": "Smart Disaster Response API is running",
         "database": "Supabase PostgreSQL",
@@ -112,24 +177,13 @@ def root():
 
 @app.get("/health")
 def health():
-
     try:
-
-        response = (
-            supabase
-            .table("incidents")
-            .select("id")
-            .limit(1)
-            .execute()
-        )
-
+        supabase.table("incidents").select("id").limit(1).execute()
         return {
             "status": "healthy",
             "database": "connected"
         }
-
     except Exception as e:
-
         return {
             "status": "unhealthy",
             "database": "error",
@@ -138,55 +192,44 @@ def health():
 
 
 # ============================================================
+# CURRENT USER
+# ============================================================
+
+@app.get("/me")
+def get_me(current_user=Depends(get_current_user)):
+    return current_user
+
+
+# ============================================================
 # CREATE INCIDENT
 # ============================================================
 
 @app.post("/incidents")
-def create_incident(incident: IncidentCreate):
-
-    # Generate unique incident ID
+def create_incident(
+    incident: IncidentCreate,
+    current_user=Depends(require_roles("citizen", "responder", "command_center", "admin"))
+):
     incident_id = str(uuid.uuid4())
-
-    # Use provided severity or default to 3
     severity = incident.severity or 3
-
-    # Temporary priority calculation
-    # We will replace this later with
-    # explainable AI-assisted prioritization.
     priority_score = severity * 20
-
-    # Current UTC timestamp
-    now = datetime.now(
-        timezone.utc
-    ).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     incident_data = {
-
         "id": incident_id,
-
+        "user_id": current_user["id"],
         "type": incident.type,
-
         "description": incident.description,
-
         "latitude": incident.location.lat,
-
         "longitude": incident.location.lng,
-
         "severity": severity,
-
         "status": "reported",
-
         "priority_score": priority_score,
-
         "note": None,
-
         "created_at": now,
-
         "updated_at": now
     }
 
     try:
-
         response = (
             supabase
             .table("incidents")
@@ -195,7 +238,6 @@ def create_incident(incident: IncidentCreate):
         )
 
         if not response.data:
-
             raise HTTPException(
                 status_code=500,
                 detail="Incident could not be created"
@@ -207,11 +249,8 @@ def create_incident(incident: IncidentCreate):
         }
 
     except HTTPException:
-
         raise
-
     except Exception as e:
-
         raise HTTPException(
             status_code=500,
             detail=f"Database error: {str(e)}"
@@ -219,24 +258,25 @@ def create_incident(incident: IncidentCreate):
 
 
 # ============================================================
-# GET ALL INCIDENTS
+# GET INCIDENTS
 # ============================================================
 
 @app.get("/incidents")
-def get_incidents():
-
+def get_incidents(current_user=Depends(get_current_user)):
     try:
-
-        response = (
+        query = (
             supabase
             .table("incidents")
             .select("*")
-            .order(
-                "created_at",
-                desc=True
-            )
-            .execute()
+            .order("created_at", desc=True)
         )
+
+        # Citizens see only their own reports.
+        # Operational roles can see all incidents.
+        if current_user["role"] == "citizen":
+            query = query.eq("user_id", current_user["id"])
+
+        response = query.execute()
 
         return {
             "count": len(response.data),
@@ -244,7 +284,6 @@ def get_incidents():
         }
 
     except Exception as e:
-
         raise HTTPException(
             status_code=500,
             detail=f"Database error: {str(e)}"
@@ -256,36 +295,41 @@ def get_incidents():
 # ============================================================
 
 @app.get("/incidents/{incident_id}")
-def get_incident(incident_id: str):
-
+def get_incident(
+    incident_id: str,
+    current_user=Depends(get_current_user)
+):
     try:
-
         response = (
             supabase
             .table("incidents")
             .select("*")
-            .eq(
-                "id",
-                incident_id
-            )
+            .eq("id", incident_id)
             .execute()
         )
 
         if not response.data:
-
             raise HTTPException(
                 status_code=404,
                 detail="Incident not found"
             )
 
-        return response.data[0]
+        incident = response.data[0]
+
+        if (
+            current_user["role"] == "citizen"
+            and incident.get("user_id") != current_user["id"]
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only view your own incidents"
+            )
+
+        return incident
 
     except HTTPException:
-
         raise
-
     except Exception as e:
-
         raise HTTPException(
             status_code=500,
             detail=f"Database error: {str(e)}"
@@ -299,51 +343,62 @@ def get_incident(incident_id: str):
 @app.patch("/incidents/{incident_id}")
 def update_incident(
     incident_id: str,
-    update: IncidentUpdate
+    update: IncidentUpdate,
+    current_user=Depends(get_current_user)
 ):
-
     update_data = {}
 
-    # Update status if provided
     if update.status is not None:
-
         update_data["status"] = update.status
 
-    # Update note if provided
     if update.note is not None:
-
         update_data["note"] = update.note
 
-    # Make sure something was provided
     if not update_data:
-
         raise HTTPException(
             status_code=400,
             detail="No fields provided for update"
         )
 
-    # Update timestamp
-    update_data["updated_at"] = (
-        datetime.now(
-            timezone.utc
-        ).isoformat()
-    )
-
     try:
+        existing = (
+            supabase
+            .table("incidents")
+            .select("id, user_id")
+            .eq("id", incident_id)
+            .execute()
+        )
+
+        if not existing.data:
+            raise HTTPException(
+                status_code=404,
+                detail="Incident not found"
+            )
+
+        incident = existing.data[0]
+
+        # Citizens can update only their own reports.
+        # Operational roles can update any incident.
+        if (
+            current_user["role"] == "citizen"
+            and incident.get("user_id") != current_user["id"]
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only update your own incidents"
+            )
+
+        update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         response = (
             supabase
             .table("incidents")
             .update(update_data)
-            .eq(
-                "id",
-                incident_id
-            )
+            .eq("id", incident_id)
             .execute()
         )
 
         if not response.data:
-
             raise HTTPException(
                 status_code=404,
                 detail="Incident not found"
@@ -355,11 +410,8 @@ def update_incident(
         }
 
     except HTTPException:
-
         raise
-
     except Exception as e:
-
         raise HTTPException(
             status_code=500,
             detail=f"Database error: {str(e)}"
