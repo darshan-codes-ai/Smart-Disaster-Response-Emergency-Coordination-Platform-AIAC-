@@ -271,11 +271,8 @@ def get_incidents(current_user=Depends(get_current_user)):
             .order("created_at", desc=True)
         )
 
-        # Citizens see only their own reports.
-        # Operational roles can see all incidents.
-        if current_user["role"] == "citizen":
-            query = query.eq("user_id", current_user["id"])
-
+        # Operational roles and citizens can view reported disaster incidents on the map.
+        # (Incident modification and operational actions remain strictly role-gated).
         response = query.execute()
 
         return {

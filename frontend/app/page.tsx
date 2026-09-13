@@ -1,8 +1,21 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
+import type { Incident } from "../components/disaster-map";
 
-const API_URL = "http://localhost:8000";
+const DisasterMap = dynamic(() => import("../components/disaster-map"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-[420px] sm:h-[480px] lg:h-[520px] w-full flex-col items-center justify-center rounded-2xl border border-white/10 bg-[#101522] text-slate-400 shadow-2xl">
+      <div className="h-8 w-8 rounded-full border-2 border-red-500 border-t-transparent animate-spin mb-3"></div>
+      <p className="text-sm font-medium text-slate-300">Loading Interactive Disaster Map...</p>
+      <p className="text-xs text-slate-500 mt-1">Initializing MapLibre GL engine</p>
+    </div>
+  ),
+});
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 type Location = {
   lat: number;
@@ -20,12 +33,54 @@ const emergencyTypes = [
   "Other",
 ];
 
+function getSidebarSeverityBadge(severity: number) {
+  switch (severity) {
+    case 1:
+      return {
+        label: "Low",
+        badgeClass: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
+      };
+    case 2:
+      return {
+        label: "Medium",
+        badgeClass: "bg-amber-500/10 text-amber-400 border-amber-500/20",
+      };
+    case 3:
+      return {
+        label: "High",
+        badgeClass: "bg-orange-500/10 text-orange-400 border-orange-500/20",
+      };
+    case 4:
+    case 5:
+    default:
+      return {
+        label: "Critical",
+        badgeClass: "bg-red-500/10 text-red-400 border-red-500/20",
+      };
+  }
+}
+
+function getSidebarTypeIcon(type: string): string {
+  const t = type.toLowerCase();
+  if (t.includes("flood") || t.includes("water")) return "🌊";
+  if (t.includes("fire")) return "🔥";
+  if (t.includes("earthquake")) return "🏚️";
+  if (t.includes("cyclone") || t.includes("storm")) return "🌀";
+  if (t.includes("medical") || t.includes("health")) return "🚑";
+  if (t.includes("collapse")) return "🏢";
+  if (t.includes("accident")) return "🚗";
+  return "⚠️";
+}
+
 export default function Home() {
   // ============================================================
   // STATE
   // ============================================================
 
   const [showReportModal, setShowReportModal] = useState(false);
+  const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
+  const [incidentsList, setIncidentsList] = useState<Incident[]>([]);
+  const [mapRefreshTrigger, setMapRefreshTrigger] = useState(0);
 
   const [emergencyType, setEmergencyType] = useState("Flood");
 
@@ -221,6 +276,9 @@ export default function Home() {
         `Emergency reported successfully! Incident ID: ${incidentId}`
       );
 
+      // Trigger map refresh to load the new incident immediately
+      setMapRefreshTrigger((prev) => prev + 1);
+
       // Clear description
       setDescription("");
 
@@ -392,8 +450,12 @@ export default function Home() {
 
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
 
-            <button className="rounded-xl border border-white/10 bg-[#101522] p-5 text-left transition hover:border-blue-500/40 hover:bg-[#151c2c]">
-
+            <button
+              onClick={() => {
+                document.getElementById("disaster-map-section")?.scrollIntoView({ behavior: "smooth" });
+              }}
+              className="rounded-xl border border-white/10 bg-[#101522] p-5 text-left transition hover:border-blue-500/40 hover:bg-[#151c2c]"
+            >
               <div className="mb-3 text-3xl">
                 🗺️
               </div>
@@ -468,173 +530,104 @@ export default function Home() {
             MAP + INCIDENTS
         ---------------------------------------------------- */}
 
-        <div className="grid gap-6 lg:grid-cols-3">
+        <div id="disaster-map-section" className="grid gap-6 lg:grid-cols-3">
 
-          {/* MAP */}
-
+          {/* REAL INTERACTIVE MAP */}
           <div className="lg:col-span-2">
-
-            <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#101522]">
-
-              <div className="flex items-center justify-between border-b border-white/10 p-5">
-
-                <div>
-
-                  <h3 className="font-bold">
-                    Nearby Disaster Map
-                  </h3>
-
-                  <p className="text-sm text-slate-400">
-                    Live emergency activity
-                  </p>
-
-                </div>
-
-                <span className="rounded-full bg-red-500/10 px-3 py-1 text-xs text-red-400">
-                  LIVE
-                </span>
-
-              </div>
-
-
-              {/* Temporary map placeholder */}
-
-              <div className="relative h-[350px] overflow-hidden bg-[#172033]">
-
-                {/* Map grid */}
-
-                <div
-                  className="absolute inset-0 opacity-20"
-                  style={{
-                    backgroundImage:
-                      "linear-gradient(rgba(255,255,255,.1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.1) 1px, transparent 1px)",
-                    backgroundSize: "40px 40px",
-                  }}
-                ></div>
-
-
-                {/* Roads */}
-
-                <div className="absolute left-0 right-0 top-1/2 h-1 rotate-12 bg-slate-500/30"></div>
-
-                <div className="absolute bottom-0 left-1/2 top-0 w-1 -rotate-12 bg-slate-500/30"></div>
-
-
-                {/* Markers */}
-
-                <div className="absolute left-[30%] top-[35%] flex h-10 w-10 items-center justify-center rounded-full bg-red-600 shadow-lg shadow-red-600/40">
-                  🚨
-                </div>
-
-                <div className="absolute left-[60%] top-[50%] flex h-10 w-10 items-center justify-center rounded-full bg-orange-500 shadow-lg shadow-orange-500/40">
-                  ⚠️
-                </div>
-
-                <div className="absolute left-[45%] top-[70%] flex h-10 w-10 items-center justify-center rounded-full bg-blue-600 shadow-lg shadow-blue-600/40">
-                  🏥
-                </div>
-
-
-                <div className="absolute bottom-5 left-5 rounded-lg bg-black/60 px-4 py-3 backdrop-blur">
-
-                  <p className="text-xs text-slate-400">
-                    Current location
-                  </p>
-
-                  <p className="text-sm font-medium">
-                    Location services active
-                  </p>
-
-                </div>
-
-              </div>
-
-            </div>
-
+            <DisasterMap
+              selectedIncidentId={selectedIncidentId}
+              onIncidentSelect={(incident) =>
+                setSelectedIncidentId(incident ? incident.id : null)
+              }
+              onIncidentsLoaded={(incs) => setIncidentsList(incs)}
+              refreshTrigger={mapRefreshTrigger}
+            />
           </div>
 
+          {/* NEARBY INCIDENTS LIST */}
+          <div className="flex flex-col rounded-2xl border border-white/10 bg-[#101522] overflow-hidden max-h-[580px]">
 
-          {/* NEARBY INCIDENTS */}
+            <div className="border-b border-white/10 p-5 flex items-center justify-between bg-[#0c101c]/80 backdrop-blur">
+              <div>
+                <h3 className="font-bold text-white">
+                  Nearby Incidents
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Real-time emergency feed
+                </p>
+              </div>
 
-          <div className="rounded-2xl border border-white/10 bg-[#101522]">
-
-            <div className="border-b border-white/10 p-5">
-
-              <h3 className="font-bold">
-                Nearby Incidents
-              </h3>
-
-              <p className="text-sm text-slate-400">
-                Current emergency reports
-              </p>
-
+              <span className="rounded-full bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-400 border border-blue-500/20">
+                {incidentsList.length} Total
+              </span>
             </div>
 
-
-            <div className="space-y-3 p-5">
-
-              <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4">
-
-                <div className="flex items-center justify-between">
-
-                  <span className="font-semibold text-red-300">
-                    Flood
-                  </span>
-
-                  <span className="rounded-full bg-red-500/10 px-2 py-1 text-xs text-red-400">
-                    Critical
-                  </span>
-
+            <div className="space-y-3 p-4 overflow-y-auto flex-1">
+              {incidentsList.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center text-slate-500">
+                  <span className="text-3xl mb-2">🛡️</span>
+                  <p className="font-medium text-slate-400">No active incidents</p>
+                  <p className="text-xs mt-1 max-w-[200px]">
+                    Use &quot;Report Emergency&quot; above if you are facing an emergency.
+                  </p>
                 </div>
+              ) : (
+                incidentsList.map((inc) => {
+                  const isSelected = selectedIncidentId === inc.id;
+                  const config = getSidebarSeverityBadge(inc.severity);
+                  const typeIcon = getSidebarTypeIcon(inc.type);
 
-                <p className="mt-2 text-sm text-slate-400">
-                  Flooding reported in residential area
-                </p>
+                  return (
+                    <button
+                      key={inc.id}
+                      type="button"
+                      onClick={() =>
+                        setSelectedIncidentId((prev) =>
+                          prev === inc.id ? null : inc.id
+                        )
+                      }
+                      className={`w-full text-left rounded-xl border p-4 transition-all duration-150 ${
+                        isSelected
+                          ? "border-blue-500/80 bg-blue-950/40 ring-2 ring-blue-500/50 shadow-lg shadow-blue-950/50"
+                          : "border-white/5 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.06]"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold text-white flex items-center gap-1.5 text-sm">
+                          <span>{typeIcon}</span>
+                          <span className="truncate">{inc.type}</span>
+                        </span>
 
-              </div>
+                        <span
+                          className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${config.badgeClass}`}
+                        >
+                          {config.label}
+                        </span>
+                      </div>
 
+                      <p className="mt-2 text-xs text-slate-300 line-clamp-2 leading-relaxed">
+                        {inc.description || "No description provided."}
+                      </p>
 
-              <div className="rounded-xl border border-orange-500/20 bg-orange-500/5 p-4">
+                      <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-2 text-[10px] text-slate-400">
+                        <span className="flex items-center gap-1">
+                          <span>Status:</span>
+                          <strong className="text-slate-200 capitalize font-medium">
+                            {inc.status || "Reported"}
+                          </strong>
+                        </span>
 
-                <div className="flex items-center justify-between">
-
-                  <span className="font-semibold text-orange-300">
-                    Road Accident
-                  </span>
-
-                  <span className="rounded-full bg-orange-500/10 px-2 py-1 text-xs text-orange-400">
-                    High
-                  </span>
-
-                </div>
-
-                <p className="mt-2 text-sm text-slate-400">
-                  Accident reported on nearby road
-                </p>
-
-              </div>
-
-
-              <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-4">
-
-                <div className="flex items-center justify-between">
-
-                  <span className="font-semibold text-yellow-300">
-                    Water Logging
-                  </span>
-
-                  <span className="rounded-full bg-yellow-500/10 px-2 py-1 text-xs text-yellow-400">
-                    Medium
-                  </span>
-
-                </div>
-
-                <p className="mt-2 text-sm text-slate-400">
-                  Heavy water accumulation reported
-                </p>
-
-              </div>
-
+                        <span className="font-mono text-slate-400">
+                          {typeof inc.latitude === "number" &&
+                          typeof inc.longitude === "number"
+                            ? `${inc.latitude.toFixed(3)}, ${inc.longitude.toFixed(3)}`
+                            : "No coords"}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })
+              )}
             </div>
 
           </div>
