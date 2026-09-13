@@ -146,18 +146,45 @@ export default function DisasterMap({
           data: { session },
         } = await supabase.auth.getSession();
 
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json",
+        const requestIncidents = async (accessToken: string) => {
+          return fetch(`${API_URL}/incidents`, {
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${accessToken}`,
+            },
+          });
         };
 
-        if (session?.access_token) {
-          headers["Authorization"] = `Bearer ${session.access_token}`;
+        // Always use a current session. If the access token is stale,
+        // refresh the Supabase session and retry the request once.
+        let accessToken = session?.access_token;
+
+        if (!accessToken) {
+          const { data: refreshed, error: refreshError } =
+            await supabase.auth.refreshSession();
+
+          if (refreshError || !refreshed.session?.access_token) {
+            throw new Error(
+              "Your login session has expired. Please log in again."
+            );
+          }
+
+          accessToken = refreshed.session.access_token;
         }
 
-        const response = await fetch(`${API_URL}/incidents`, {
-          method: "GET",
-          headers,
-        });
+        let response = await requestIncidents(accessToken);
+
+        if (response.status === 401) {
+          const { data: refreshed, error: refreshError } =
+            await supabase.auth.refreshSession();
+
+          if (!refreshError && refreshed.session?.access_token) {
+            response = await requestIncidents(
+              refreshed.session.access_token
+            );
+          }
+        }
 
         if (!response.ok) {
           let errorDetail = `Error ${response.status}: Failed to load incidents`;
