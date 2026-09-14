@@ -95,76 +95,74 @@ class IncidentUpdate(BaseModel):
 
 
 def get_current_user(authorization: Optional[str] = Header(default=None)):
-    """Verify the Supabase access token and return user + role."""
+    """Validate a Supabase access token and return the user's profile."""
 
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=401,
-            detail="Missing or invalid Authorization header"
+            detail="Missing or invalid Authorization header",
         )
 
     token = authorization.split(" ", 1)[1].strip()
-
     if not token:
-        raise HTTPException(
-            status_code=401,
-            detail="Missing access token"
-        )
+        raise HTTPException(status_code=401, detail="Missing access token")
 
     try:
-        auth_url = SUPABASE_URL.rstrip("/") + "/auth/v1/user"
-        auth_request = urllib.request.Request(
-            auth_url,
-            headers={
-                "apikey": SUPABASE_PUBLISHABLE_KEY,
-                "Authorization": "Bearer " + token,
-            },
-            method="GET",
-        )
+        # Use Supabase's official auth client instead of manually calling
+        # /auth/v1/user. This keeps JWT validation tied to the same project
+        # configuration used by the backend Supabase client.
+        auth_response = supabase.auth.get_user(token)
+        user = getattr(auth_response, "user", None)
 
-        try:
-            with urllib.request.urlopen(auth_request, timeout=10) as auth_http_response:
-                auth_payload = json.loads(auth_http_response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
-                raise HTTPException(status_code=401, detail="Invalid or expired access token")
-            raise
+        if user is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired access token",
+            )
 
-        user = auth_payload
-        if not user or not user.get("id"):
-            raise HTTPException(status_code=401, detail="Invalid or expired access token")
+        user_id = getattr(user, "id", None)
+        if not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired access token",
+            )
+
+        email = getattr(user, "email", None)
+
+        # Do not use .single(): a missing profile should be a clear 403,
+        # not an exception that gets misreported as an authentication failure.
         profile_response = (
             supabase
             .table("profiles")
             .select("role, full_name")
-            .eq("id", user["id"])
-            .single()
+            .eq("id", user_id)
+            .limit(1)
             .execute()
         )
 
-        profile = profile_response.data
+        profile = profile_response.data[0] if profile_response.data else None
 
         if not profile:
             raise HTTPException(
                 status_code=403,
-                detail="User profile not found. Create a profiles row for this Supabase user."
+                detail="User profile not found. Create a profiles row for this Supabase user.",
             )
 
         return {
-            "id": user["id"],
-            "email": user.get("email"),
-            "role": profile.get("role", "citizen"),
+            "id": user_id,
+            "email": email,
+            "role": profile.get("role") or "citizen",
             "full_name": profile.get("full_name"),
         }
 
     except HTTPException:
         raise
-    except Exception:
+    except Exception as exc:
+        print(f"get_current_user error: {exc}")
         raise HTTPException(
-            status_code=401,
-            detail="Invalid or expired access token"
+            status_code=500,
+            detail="Supabase authentication succeeded/was reached, but the user profile could not be loaded.",
         )
-
 
 def require_roles(*allowed_roles: str):
     def role_dependency(current_user=Depends(get_current_user)):
