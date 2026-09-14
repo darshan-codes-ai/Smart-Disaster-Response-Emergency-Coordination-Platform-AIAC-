@@ -2,64 +2,91 @@
 
 import { createClient } from "./client";
 
+// Keep one browser auth client for the lifetime of this module. Multiple
+// browser clients can race while rotating the same Supabase refresh token.
+const supabase = createClient();
+
 let refreshingDeferred: Promise<string | null> | null = null;
 
-/**
- * Returns a valid Supabase access token for backend API requests.
- *
- * - Uses the current session when one exists (the underlying Supabase client
- *   auto-refreshes tokens that are near or past expiry).
- * - Falls back to an explicit refresh when no usable session is available.
- * - When `forceRefresh` is true (e.g. after the backend returned a 401), it
- *   will always call `refreshSession()` so the caller receives a brand new,
- *   definitively fresh token for a retry.
- *
- * `null` is returned only when there is no authenticated session at all
- * (login required), or when token refresh fails.
- */
-export async function getAccessToken(
-  forceRefresh = false
-): Promise<string | null> {
-  const supabase = createClient();
+async function refreshAccessToken(): Promise<string | null> {
+  if (refreshingDeferred) return refreshingDeferred;
 
-  // Fast path: use the existing session token (getSession auto-refreshes
-  // expired tokens).
-  if (!forceRefresh) {
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
+  refreshingDeferred = (async () => {
+    try {
+      // Read the current session first, then explicitly pass its refresh token.
+      // This avoids refreshSession() selecting an older cached session while
+      // another component is already rotating the session.
+      const { data: sessionData, error: sessionError } =
+        await supabase.auth.getSession();
 
-    // Do not trust an old cached token indefinitely. If the token is
-    // missing an expiry or is close to expiry, explicitly refresh it.
-    const expiresAt = session?.expires_at ?? 0;
-    const expiresSoon =
-      expiresAt > 0 && expiresAt <= Math.floor(Date.now() / 1000) + 60;
-
-    if (session?.access_token && !expiresSoon) {
-      return session.access_token;
-    }
-  }
-
-  // No valid session (or caller explicitly wants a fresh token): refresh.
-  if (!refreshingDeferred) {
-    refreshingDeferred = (async () => {
-      const { data, error } = await supabase.auth.refreshSession();
-      if (error) {
-        console.error("Supabase refreshSession error:", error.message);
+      if (sessionError || !sessionData.session?.refresh_token) {
         return null;
       }
-      return data.session?.access_token ?? null;
-    })().finally(() => {
+
+      const { data, error } = await supabase.auth.refreshSession({
+        refresh_token: sessionData.session.refresh_token,
+      });
+
+      if (error || !data.session?.access_token) {
+        console.error(
+          "Supabase session refresh failed:",
+          error?.message ?? "No access token returned"
+        );
+        return null;
+      }
+
+      return data.session.access_token;
+    } catch (error) {
+      console.error("Supabase session refresh failed:", error);
+      return null;
+    } finally {
       refreshingDeferred = null;
-    });
-  }
+    }
+  })();
 
   return refreshingDeferred;
 }
 
 /**
- * Request helper that attaches the given access token to the API request.
- * Uses the same API base URL as the rest of the dashboard.
+ * Returns an access token suitable for FastAPI.
+ *
+ * Normal calls use the current session. Expired/near-expiry sessions are
+ * explicitly refreshed. forceRefresh=true always performs an explicit
+ * refresh and is used after a backend 401.
+ */
+export async function getAccessToken(
+  forceRefresh = false
+): Promise<string | null> {
+  try {
+    const {
+      data: { session },
+      error,
+    } = await supabase.auth.getSession();
+
+    if (error) {
+      console.error("Supabase getSession failed:", error.message);
+      return null;
+    }
+
+    const expiresAt = session?.expires_at ?? 0;
+    const now = Math.floor(Date.now() / 1000);
+    const expiresSoon = !expiresAt || expiresAt <= now + 60;
+
+    if (!forceRefresh && session?.access_token && !expiresSoon) {
+      return session.access_token;
+    }
+
+    return refreshAccessToken();
+  } catch (error) {
+    console.error("Supabase access-token lookup failed:", error);
+    return null;
+  }
+}
+
+/**
+ * Sends a request with an explicitly selected Supabase access token.
+ * The Authorization header is never allowed to be overwritten by another
+ * interceptor.
  */
 export async function requestWithToken(
   url: string,
