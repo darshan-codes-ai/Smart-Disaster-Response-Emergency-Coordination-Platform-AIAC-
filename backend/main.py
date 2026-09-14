@@ -132,7 +132,7 @@ def get_current_user(authorization: Optional[str] = Header(default=None)):
             supabase
             .table("profiles")
             .select("role, full_name")
-            .eq("id", user.id)
+            .eq("id", user["id"])
             .single()
             .execute()
         )
