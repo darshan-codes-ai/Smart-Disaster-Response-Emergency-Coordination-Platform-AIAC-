@@ -28,7 +28,14 @@ export async function getAccessToken(
     const {
       data: { session },
     } = await supabase.auth.getSession();
-    if (session?.access_token) {
+
+    // Do not trust an old cached token indefinitely. If the token is
+    // missing an expiry or is close to expiry, explicitly refresh it.
+    const expiresAt = session?.expires_at ?? 0;
+    const expiresSoon =
+      expiresAt > 0 && expiresAt <= Math.floor(Date.now() / 1000) + 60;
+
+    if (session?.access_token && !expiresSoon) {
       return session.access_token;
     }
   }
