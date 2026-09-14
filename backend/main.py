@@ -21,6 +21,11 @@ load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
+SUPABASE_PUBLISHABLE_KEY = (
+    os.getenv("SUPABASE_PUBLISHABLE_KEY")
+    or os.getenv("SUPABASE_ANON_KEY")
+    or SUPABASE_SECRET_KEY
+)
 
 if not SUPABASE_URL:
     raise RuntimeError("SUPABASE_URL is missing. Check backend/.env")
@@ -111,7 +116,7 @@ def get_current_user(authorization: Optional[str] = Header(default=None)):
         auth_request = urllib.request.Request(
             auth_url,
             headers={
-                "apikey": SUPABASE_SECRET_KEY,
+                "apikey": SUPABASE_PUBLISHABLE_KEY,
                 "Authorization": "Bearer " + token,
             },
             method="GET",
@@ -142,7 +147,7 @@ def get_current_user(authorization: Optional[str] = Header(default=None)):
         if not profile:
             raise HTTPException(
                 status_code=403,
-                detail="User profile not found"
+                detail="User profile not found. Create a profiles row for this Supabase user."
             )
 
         return {
