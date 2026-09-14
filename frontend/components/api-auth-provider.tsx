@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { createClient } from "../lib/supabase/client";
+import { getAccessToken } from "../lib/supabase/access-token";
 
 const API_URL = "http://localhost:8000";
 
@@ -11,7 +11,6 @@ const API_URL = "http://localhost:8000";
  */
 export default function ApiAuthProvider() {
   useEffect(() => {
-    const supabase = createClient();
     const originalFetch = window.fetch.bind(window);
 
     window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -26,16 +25,18 @@ export default function ApiAuthProvider() {
         return originalFetch(input, init);
       }
 
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-
       const headers = new Headers(
         init?.headers ?? (input instanceof Request ? input.headers : undefined)
       );
 
-      if (session?.access_token) {
-        headers.set("Authorization", `Bearer ${session.access_token}`);
+      // Callers like disaster-map.tsx already attach a freshly-refreshed
+      // Authorization header (see requestWithToken). Never overwrite it here
+      // with a potentially-stale session token from getSession().
+      if (!headers.has("Authorization")) {
+        const accessToken = await getAccessToken();
+        if (accessToken) {
+          headers.set("Authorization", `Bearer ${accessToken}`);
+        }
       }
 
       return originalFetch(input, {
