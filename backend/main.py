@@ -1,5 +1,8 @@
 import os
+import json
 import uuid
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -104,15 +107,27 @@ def get_current_user(authorization: Optional[str] = Header(default=None)):
         )
 
     try:
-        auth_response = supabase.auth.get_user(token)
-        user = auth_response.user
+        auth_url = SUPABASE_URL.rstrip("/") + "/auth/v1/user"
+        auth_request = urllib.request.Request(
+            auth_url,
+            headers={
+                "apikey": SUPABASE_SECRET_KEY,
+                "Authorization": "Bearer " + token,
+            },
+            method="GET",
+        )
 
-        if not user:
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid or expired access token"
-            )
+        try:
+            with urllib.request.urlopen(auth_request, timeout=10) as auth_http_response:
+                auth_payload = json.loads(auth_http_response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise HTTPException(status_code=401, detail="Invalid or expired access token")
+            raise
 
+        user = auth_payload
+        if not user or not user.get("id"):
+            raise HTTPException(status_code=401, detail="Invalid or expired access token")
         profile_response = (
             supabase
             .table("profiles")
@@ -131,8 +146,8 @@ def get_current_user(authorization: Optional[str] = Header(default=None)):
             )
 
         return {
-            "id": user.id,
-            "email": user.email,
+            "id": user["id"],
+            "email": user.get("email"),
             "role": profile.get("role", "citizen"),
             "full_name": profile.get("full_name"),
         }
