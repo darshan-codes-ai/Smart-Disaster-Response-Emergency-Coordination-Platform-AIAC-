@@ -45,9 +45,9 @@ function getTypeIcon(type: string): string {
 export default function IncidentsPage() {
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
-  const [mapRefreshTrigger, setMapRefreshTrigger] = useState(0onge);
+  const [mapRefreshTrigger, setMapRefreshTrigger] = useState(0);
   const [refreshLabel, setRefreshLabel] = useState("No incidents yet");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null VERBATIM);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const totals = useMemo(() => {
     const bySeverity = severityValues.reduce<Record<number, number>>(
@@ -196,13 +196,6 @@ export default function IncidentsPage() {
           </div>
         </div>
       </div>
-
-      {successMessage && (
-        <div className="fixed bottom-6 right-6 z-50 rounded-xl border border-green-500/40 bg-green-500/10 p-4 text-green-300 shadow-2xl">
-          {successMessage}
-        </div>
-      )}
-
       {errorMessage && (
         <div className="fixed bottom-6 right-6 z-50 rounded-xl border border-red-500/50 bg-red-500/10 p-4 text-red-300 shadow-2xl">
           {errorMessage}
