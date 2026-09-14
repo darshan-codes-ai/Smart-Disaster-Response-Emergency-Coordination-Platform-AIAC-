@@ -143,10 +143,16 @@ def get_current_user(authorization: Optional[str] = Header(default=None)):
         profile = profile_response.data[0] if profile_response.data else None
 
         if not profile:
-            raise HTTPException(
-                status_code=403,
-                detail="User profile not found. Create a profiles row for this Supabase user.",
-            )
+            # A newly authenticated Supabase user may not have a profiles row yet.
+            # Default to the least-privileged role so the incident map/report
+            # works immediately. Elevated roles still require an explicit row.
+            print(f"No profile row for {user_id}; defaulting to citizen")
+            return {
+                "id": user_id,
+                "email": email,
+                "role": "citizen",
+                "full_name": None,
+            }
 
         return {
             "id": user_id,
