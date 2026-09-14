@@ -282,28 +282,39 @@ def create_incident(
 
 @app.get("/incidents")
 def get_incidents(current_user=Depends(get_current_user)):
-    try:
-        query = (
-            supabase
-            .table("incidents")
-            .select("*")
-            .order("created_at", desc=True)
-        )
+    # Supabase's synchronous HTTP client can occasionally surface Windows
+    # WSAEWOULDBLOCK/WinError 10035 under concurrent browser requests. Retry
+    # the read with a fresh client so a transient socket state does not break
+    # the live incident map.
+    import time
 
-        # Operational roles and citizens can view reported disaster incidents on the map.
-        # (Incident modification and operational actions remain strictly role-gated).
-        response = query.execute()
+    last_error = None
+    for attempt in range(3):
+        try:
+            client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+            response = (
+                client
+                .table("incidents")
+                .select("*")
+                .order("created_at", desc=True)
+                .execute()
+            )
 
-        return {
-            "count": len(response.data),
-            "incidents": response.data
-        }
+            return {
+                "count": len(response.data),
+                "incidents": response.data
+            }
+        except Exception as e:
+            last_error = e
+            if attempt < 2:
+                time.sleep(0.35 * (attempt + 1))
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Database error: {str(e)}"
-        )
+    import traceback
+    traceback.print_exc()
+    raise HTTPException(
+        status_code=500,
+        detail=f"Database error after 3 attempts: {type(last_error).__name__}: {last_error}"
+    )
 
 
 # ============================================================
