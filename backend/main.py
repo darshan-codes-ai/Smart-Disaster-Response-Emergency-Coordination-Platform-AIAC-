@@ -268,9 +268,11 @@ def create_incident(
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
-            detail=f"Database error: {str(e)}"
+            detail=f"Database error: {type(e).__name__}: {e}"
         )
 
 
