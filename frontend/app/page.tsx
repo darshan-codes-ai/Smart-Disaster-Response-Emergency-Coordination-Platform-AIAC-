@@ -3,6 +3,7 @@
 import { useState } from "react";
 import dynamic from "next/dynamic";
 import type { Incident } from "../components/disaster-map";
+import { getAccessToken, requestWithToken } from "../lib/supabase/access-token";
 
 const DisasterMap = dynamic(() => import("../components/disaster-map"), {
   ssr: false,
@@ -204,30 +205,44 @@ export default function Home() {
       // SEND REQUEST TO FASTAPI
       // --------------------------------------------------------
 
-      const response = await fetch(
-        `${API_URL}/incidents`,
+      const accessToken = await getAccessToken();
+
+      if (!accessToken) {
+        throw new Error("Your login session has expired. Please log in again.");
+      }
+
+      const requestBody = JSON.stringify({
+        type: emergencyType,
+        description: description.trim(),
+        location: {
+          lat: location.lat,
+          lng: location.lng,
+        },
+        severity: 3,
+      });
+
+      let response = await requestWithToken(
+        API_URL + "/incidents",
+        accessToken,
         {
           method: "POST",
-
-          headers: {
-            "Content-Type": "application/json",
-          },
-
-          body: JSON.stringify({
-            type: emergencyType,
-
-            description: description.trim(),
-
-            location: {
-              lat: location.lat,
-              lng: location.lng,
-            },
-
-            severity: 3,
-          }),
+          body: requestBody,
         }
       );
 
+      if (response.status === 401) {
+        const freshToken = await getAccessToken(true);
+        if (freshToken) {
+          response = await requestWithToken(
+            API_URL + "/incidents",
+            freshToken,
+            {
+              method: "POST",
+              body: requestBody,
+            }
+          );
+        }
+      }
       // --------------------------------------------------------
       // READ RESPONSE
       // --------------------------------------------------------
