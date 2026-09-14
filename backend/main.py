@@ -129,36 +129,29 @@ def get_current_user(authorization: Optional[str] = Header(default=None)):
 
         email = getattr(user, "email", None)
 
-        # Do not use .single(): a missing profile should be a clear 403,
-        # not an exception that gets misreported as an authentication failure.
-        profile_response = (
-            supabase
-            .table("profiles")
-            .select("role, full_name")
-            .eq("id", user_id)
-            .limit(1)
-            .execute()
-        )
-
-        profile = profile_response.data[0] if profile_response.data else None
-
-        if not profile:
-            # A newly authenticated Supabase user may not have a profiles row yet.
-            # Default to the least-privileged role so the incident map/report
-            # works immediately. Elevated roles still require an explicit row.
-            print(f"No profile row for {user_id}; defaulting to citizen")
-            return {
-                "id": user_id,
-                "email": email,
-                "role": "citizen",
-                "full_name": None,
-            }
+        # Profile lookup is best-effort. Authentication must not fail merely
+        # because the profiles table is empty, protected by RLS, or temporarily
+        # unavailable. All authenticated users get the least-privileged citizen
+        # role unless an explicit profile row is readable.
+        profile = None
+        try:
+            profile_response = (
+                supabase
+                .table("profiles")
+                .select("role, full_name")
+                .eq("id", user_id)
+                .limit(1)
+                .execute()
+            )
+            profile = profile_response.data[0] if profile_response.data else None
+        except Exception as profile_error:
+            print(f"Profile lookup unavailable for {user_id}: {profile_error}")
 
         return {
             "id": user_id,
             "email": email,
-            "role": profile.get("role") or "citizen",
-            "full_name": profile.get("full_name"),
+            "role": (profile.get("role") if profile else None) or "citizen",
+            "full_name": profile.get("full_name") if profile else None,
         }
 
     except HTTPException:
