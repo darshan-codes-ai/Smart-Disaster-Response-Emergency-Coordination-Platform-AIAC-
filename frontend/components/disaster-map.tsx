@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import * as maplibregl from "maplibre-gl";
-import { getAccessToken, requestWithToken } from "../lib/supabase/access-token";
+import { createClient } from "../lib/supabase/client";
 
 export interface Incident {
   id: string;
@@ -141,33 +141,47 @@ export default function DisasterMap({
   const fetchIncidents = useCallback(
     async () => {
       try {
-        // Obtain a valid access token. The shared helper auto-refreshes the
-        // Supabase session when the stored token is missing/near expiry, so
-        // we never send a stale Bearer token to the backend.
-        const accessToken = await getAccessToken();
+        const supabase = createClient();
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+
+        const requestIncidents = async (accessToken: string) => {
+          return fetch(`${API_URL}/incidents`, {
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${accessToken}`,
+            },
+          });
+        };
+
+        // Always use a current session. If the access token is stale,
+        // refresh the Supabase session and retry the request once.
+        let accessToken = session?.access_token;
 
         if (!accessToken) {
-          throw new Error(
-            "Your login session has expired. Please log in again."
-          );
+          const { data: refreshed, error: refreshError } =
+            await supabase.auth.refreshSession();
+
+          if (refreshError || !refreshed.session?.access_token) {
+            throw new Error(
+              "Your login session has expired. Please log in again."
+            );
+          }
+
+          accessToken = refreshed.session.access_token;
         }
 
-        // Perform the request with the current token.
-        let response = await requestWithToken(
-          `${API_URL}/incidents`,
-          accessToken,
-          { method: "GET" }
-        );
+        let response = await requestIncidents(accessToken);
 
-        // The backend saw the token as invalid/expired: force a fresh token
-        // and retry the request exactly once (no infinite retry loop).
         if (response.status === 401) {
-          const freshToken = await getAccessToken(true);
-          if (freshToken) {
-            response = await requestWithToken(
-              `${API_URL}/incidents`,
-              freshToken,
-              { method: "GET" }
+          const { data: refreshed, error: refreshError } =
+            await supabase.auth.refreshSession();
+
+          if (!refreshError && refreshed.session?.access_token) {
+            response = await requestIncidents(
+              refreshed.session.access_token
             );
           }
         }
