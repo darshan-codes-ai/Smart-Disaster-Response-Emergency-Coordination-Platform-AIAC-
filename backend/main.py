@@ -89,6 +89,19 @@ ALLOWED_INCIDENT_STATUSES = {
     "cancelled",
 }
 
+OPERATIONAL_ROLES = {
+    "responder",
+    "command_center",
+    "admin",
+    "hospital",
+    "shelter",
+}
+
+CITIZEN_ALLOWED_STATUSES = {
+    "reported",
+    "cancelled",
+}
+
 
 class Location(BaseModel):
     lat: float
@@ -427,15 +440,27 @@ def update_incident(
 
         incident = existing.data[0]
 
-        # Citizens can update only their own reports.
-        # Operational roles can update any incident.
-        if (
-            current_user["role"] == "citizen"
-            and incident.get("user_id") != current_user["id"]
-        ):
+        # RBAC Check:
+        user_role = current_user.get("role", "citizen")
+
+        if user_role == "citizen":
+            if incident.get("user_id") != current_user.get("id"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="You can only update your own incidents"
+                )
+            if update.status is not None and update.status not in CITIZEN_ALLOWED_STATUSES:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Citizens may only cancel or provide notes on their own incidents"
+                )
+        elif user_role in OPERATIONAL_ROLES:
+            # Operational roles can update any incident through the supported workflow
+            pass
+        else:
             raise HTTPException(
                 status_code=403,
-                detail="You can only update your own incidents"
+                detail="You do not have permission to update incidents"
             )
 
         update_data["updated_at"] = datetime.now(timezone.utc).isoformat()

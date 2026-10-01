@@ -301,6 +301,170 @@ class IncidentApiSecurityTests(unittest.TestCase):
         self.assertIn("No fields provided for update", response.json()["detail"])
 
     # ------------------------------------------------------------
+    # Milestone 2: Operational Workflow & Role Access Tests
+    # ------------------------------------------------------------
+    @patch("backend.main.supabase")
+    def test_command_center_can_update_incident(self, mock_supabase):
+        """Command center coordinator can update incident status and add operational notes."""
+        cc_user = {
+            "id": "cc-user-1",
+            "role": "command_center",
+            "email": "coordinator@hq.gov",
+            "full_name": "Commander Jones",
+        }
+        app.dependency_overrides[get_current_user] = lambda: cc_user
+
+        updated_record = {
+            "id": "inc-600",
+            "user_id": "citizen-1",
+            "status": "verified",
+            "note": "Verified with local fire department",
+            "updated_at": "2026-10-02T02:00:00Z",
+        }
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-600", "user_id": "citizen-1"}
+        ]
+        mock_table.update.return_value.eq.return_value.execute.return_value.data = [updated_record]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-600", json={
+            "status": "verified",
+            "note": "Verified with local fire department",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["incident"]["status"], "verified")
+        self.assertEqual(data["incident"]["note"], "Verified with local fire department")
+
+    @patch("backend.main.supabase")
+    def test_command_center_can_progress_workflow(self, mock_supabase):
+        """Command center can move incidents through the complete operational workflow."""
+        cc_user = {
+            "id": "cc-user-1",
+            "role": "command_center",
+            "email": "coordinator@hq.gov",
+        }
+        app.dependency_overrides[get_current_user] = lambda: cc_user
+
+        workflow_sequence = ["verified", "assigned", "in_progress", "resolved", "cancelled"]
+
+        for step in workflow_sequence:
+            with self.subTest(workflow_step=step):
+                mock_table = MagicMock()
+                mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+                    {"id": "inc-wf", "user_id": "citizen-2"}
+                ]
+                mock_table.update.return_value.eq.return_value.execute.return_value.data = [
+                    {"id": "inc-wf", "status": step}
+                ]
+                mock_supabase.table.return_value = mock_table
+
+                response = self.client.patch("/incidents/inc-wf", json={"status": step})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["incident"]["status"], step)
+
+    @patch("backend.main.supabase")
+    def test_responder_can_update_incident_workflow(self, mock_supabase):
+        """Responder can update incident to in_progress and resolved with field notes."""
+        responder_user = {
+            "id": "resp-user-1",
+            "role": "responder",
+            "email": "responder1@fire.gov",
+        }
+        app.dependency_overrides[get_current_user] = lambda: responder_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-resp", "user_id": "citizen-3"}
+        ]
+        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-resp", "status": "resolved", "note": "Fire extinguished"}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-resp", json={
+            "status": "resolved",
+            "note": "Fire extinguished"
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["incident"]["status"], "resolved")
+
+    @patch("backend.main.supabase")
+    def test_citizen_cannot_set_operational_statuses(self, mock_supabase):
+        """Citizens cannot mark incidents as verified, assigned, in_progress, or resolved."""
+        citizen_user = {
+            "id": "citizen-user-1",
+            "role": "citizen",
+            "email": "citizen@test.com",
+        }
+        app.dependency_overrides[get_current_user] = lambda: citizen_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-own", "user_id": "citizen-user-1"}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        operational_statuses = ["verified", "assigned", "in_progress", "resolved"]
+        for op_status in operational_statuses:
+            with self.subTest(op_status=op_status):
+                response = self.client.patch("/incidents/inc-own", json={
+                    "status": op_status
+                })
+                self.assertEqual(response.status_code, 403)
+                self.assertIn("Citizens may only cancel or provide notes", response.json()["detail"])
+
+    @patch("backend.main.supabase")
+    def test_citizen_can_cancel_own_incident(self, mock_supabase):
+        """Citizens can cancel their own incident report."""
+        citizen_user = {
+            "id": "citizen-user-1",
+            "role": "citizen",
+            "email": "citizen@test.com",
+        }
+        app.dependency_overrides[get_current_user] = lambda: citizen_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-own", "user_id": "citizen-user-1"}
+        ]
+        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-own", "status": "cancelled", "note": "False alarm"}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-own", json={
+            "status": "cancelled",
+            "note": "False alarm"
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["incident"]["status"], "cancelled")
+
+    @patch("backend.main.supabase")
+    def test_unauthorized_role_cannot_update_incident(self, mock_supabase):
+        """Users with non-operational roles cannot update incidents."""
+        unauthorized_user = {
+            "id": "guest-user-1",
+            "role": "external_guest",
+            "email": "guest@unknown.com",
+        }
+        app.dependency_overrides[get_current_user] = lambda: unauthorized_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-any", "user_id": "citizen-9"}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-any", json={"status": "in_progress"})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("You do not have permission to update incidents", response.json()["detail"])
+
+    # ------------------------------------------------------------
     # 5. Public / System Endpoints
     # ------------------------------------------------------------
     def test_root_endpoint(self):

@@ -1,8 +1,10 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
+import Link from "next/link";
 import dynamic from "next/dynamic";
 import type { Incident } from "../../components/disaster-map";
+import { useCurrentUser } from "../../lib/supabase/use-current-user";
 
 const DisasterMap = dynamic(() => import("../../components/disaster-map"), {
   ssr: false,
@@ -43,6 +45,7 @@ function getTypeIcon(type: string): string {
 }
 
 export default function IncidentsPage() {
+  const { isCommandCenter, isResponder } = useCurrentUser();
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [mapRefreshTrigger, setMapRefreshTrigger] = useState(0);
@@ -85,13 +88,35 @@ export default function IncidentsPage() {
             <p className="text-sm text-slate-400">Smart Disaster Response - Incident Directory</p>
           </div>
           <div className="flex items-center gap-3">
-            <div className="hidden items-center gap-2 rounded-full border border-green-500/20 bg-green-500/10 px-4 py-2 text-sm text-green-400 sm:flex">
+            {isCommandCenter && (
+              <Link
+                href="/command"
+                className="hidden rounded-lg border border-purple-500/40 bg-purple-950/40 px-3.5 py-2 text-xs font-semibold text-purple-200 transition hover:bg-purple-900/60 sm:inline-flex items-center gap-1.5"
+              >
+                <span>🛡️</span> Command Center
+              </Link>
+            )}
+            {isResponder && (
+              <Link
+                href="/responder"
+                className="hidden rounded-lg border border-blue-500/40 bg-blue-950/40 px-3.5 py-2 text-xs font-semibold text-blue-200 transition hover:bg-blue-900/60 sm:inline-flex items-center gap-1.5"
+              >
+                <span>🚒</span> Responder Console
+              </Link>
+            )}
+            <Link
+              href="/"
+              className="rounded-lg border border-white/10 bg-white/5 px-3.5 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/10 hover:text-white"
+            >
+              Citizen Home
+            </Link>
+            <div className="hidden items-center gap-2 rounded-full border border-green-500/20 bg-green-500/10 px-4 py-2 text-sm text-green-400 lg:flex">
               <span className="h-2 w-2 rounded-full bg-green-400"></span>
               System Online
             </div>
             <button
               onClick={refresh}
-              className="rounded-lg bg-red-600 px-5 py-2.5 font-semibold transition hover:bg-red-700"
+              className="rounded-lg bg-red-600 px-5 py-2.5 font-semibold transition hover:bg-red-700 text-sm"
             >
               Refresh Incidents
             </button>
@@ -136,6 +161,30 @@ export default function IncidentsPage() {
               <h3 className="font-bold text-white">All Incidents</h3>
               <p className="text-xs text-slate-400">Real-time emergency feed</p>
             </div>
+
+            {selectedIncidentId && (isCommandCenter || isResponder) && (
+              <div className="border-b border-purple-500/30 bg-purple-950/30 px-4 py-2 flex items-center justify-between text-xs">
+                <span className="text-purple-300">Operational action:</span>
+                <div className="flex items-center gap-2">
+                  {isCommandCenter && (
+                    <Link
+                      href="/command"
+                      className="rounded bg-purple-600/80 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-purple-600 transition"
+                    >
+                      Command Center &rarr;
+                    </Link>
+                  )}
+                  {isResponder && (
+                    <Link
+                      href="/responder"
+                      className="rounded bg-blue-600/80 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-blue-600 transition"
+                    >
+                      Responder Console &rarr;
+                    </Link>
+                  )}
+                </div>
+              </div>
+            )}
 
             <div className="flex-1 space-y-3 overflow-y-auto p-4">
               {incidents.length === 0 ? (

@@ -1,9 +1,11 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import dynamic from "next/dynamic";
 import type { Incident } from "../components/disaster-map";
 import { getAccessToken, requestWithToken } from "../lib/supabase/access-token";
+import { useCurrentUser } from "../lib/supabase/use-current-user";
 
 const DisasterMap = dynamic(() => import("../components/disaster-map"), {
   ssr: false,
@@ -78,6 +80,7 @@ export default function Home() {
   // STATE
   // ============================================================
 
+  const { isCommandCenter, isResponder } = useCurrentUser();
   const [showReportModal, setShowReportModal] = useState(false);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [incidentsList, setIncidentsList] = useState<Incident[]>([]);
@@ -338,20 +341,43 @@ export default function Home() {
             </p>
           </div>
 
-          <div className="hidden items-center gap-3 md:flex">
+          <div className="flex items-center gap-3">
+            {isCommandCenter && (
+              <Link
+                href="/command"
+                className="hidden rounded-lg border border-purple-500/40 bg-purple-950/40 px-3.5 py-2 text-xs font-semibold text-purple-200 transition hover:bg-purple-900/60 sm:inline-flex items-center gap-1.5"
+              >
+                <span>🛡️</span> Command Center
+              </Link>
+            )}
 
-            <div className="flex items-center gap-2 rounded-full border border-green-500/20 bg-green-500/10 px-4 py-2 text-sm text-green-400">
+            {isResponder && (
+              <Link
+                href="/responder"
+                className="hidden rounded-lg border border-blue-500/40 bg-blue-950/40 px-3.5 py-2 text-xs font-semibold text-blue-200 transition hover:bg-blue-900/60 sm:inline-flex items-center gap-1.5"
+              >
+                <span>🚒</span> Responder Console
+              </Link>
+            )}
+
+            <Link
+              href="/incidents"
+              className="hidden rounded-lg border border-white/10 bg-white/5 px-3.5 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/10 hover:text-white md:inline-flex"
+            >
+              All Incidents
+            </Link>
+
+            <div className="hidden items-center gap-2 rounded-full border border-green-500/20 bg-green-500/10 px-4 py-2 text-sm text-green-400 md:flex">
               <span className="h-2 w-2 rounded-full bg-green-400"></span>
               System Online
             </div>
 
             <button
               onClick={openReportModal}
-              className="rounded-lg bg-red-600 px-5 py-2.5 font-semibold transition hover:bg-red-700"
+              className="rounded-lg bg-red-600 px-5 py-2.5 font-semibold transition hover:bg-red-700 text-sm"
             >
               Report Emergency
             </button>
-
           </div>
 
         </div>
