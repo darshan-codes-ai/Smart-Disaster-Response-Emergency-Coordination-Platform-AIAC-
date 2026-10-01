@@ -47,7 +47,7 @@ export default function IncidentsPage() {
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [mapRefreshTrigger, setMapRefreshTrigger] = useState(0);
   const [refreshLabel, setRefreshLabel] = useState("No incidents yet");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorMessage] = useState<string | null>(null);
 
   const totals = useMemo(() => {
     const bySeverity = severityValues.reduce<Record<number, number>>(

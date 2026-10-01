@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { getAccessToken } from "../lib/supabase/access-token";
 
-const API_URL = "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 /**
  * Adds the current Supabase access token to browser requests sent to FastAPI.

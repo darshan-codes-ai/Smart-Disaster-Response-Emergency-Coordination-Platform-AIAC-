@@ -59,9 +59,17 @@ app = FastAPI(
 # CORS
 # ============================================================
 
+ALLOWED_ORIGINS_ENV = os.getenv("ALLOWED_ORIGINS")
+if ALLOWED_ORIGINS_ENV:
+    allowed_origins = [
+        origin.strip() for origin in ALLOWED_ORIGINS_ENV.split(",") if origin.strip()
+    ]
+else:
+    allowed_origins = ["http://localhost:3000"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -71,6 +79,16 @@ app.add_middleware(
 # ============================================================
 # DATA MODELS
 # ============================================================
+
+ALLOWED_INCIDENT_STATUSES = {
+    "reported",
+    "verified",
+    "assigned",
+    "in_progress",
+    "resolved",
+    "cancelled",
+}
+
 
 class Location(BaseModel):
     lat: float
@@ -376,6 +394,11 @@ def update_incident(
     update_data = {}
 
     if update.status is not None:
+        if update.status not in ALLOWED_INCIDENT_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid status '{update.status}'. Allowed statuses are: {', '.join(sorted(ALLOWED_INCIDENT_STATUSES))}"
+            )
         update_data["status"] = update.status
 
     if update.note is not None:
