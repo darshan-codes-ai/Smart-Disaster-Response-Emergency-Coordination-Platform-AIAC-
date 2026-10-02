@@ -5,43 +5,31 @@ import Link from "next/link";
 import dynamic from "next/dynamic";
 import type { Incident } from "../../components/disaster-map";
 import { useCurrentUser } from "../../lib/supabase/use-current-user";
+import Navbar from "../../components/navbar";
+import StatusBadge from "../../components/status-badge";
+import SeverityBadge from "../../components/severity-badge";
 
 const DisasterMap = dynamic(() => import("../../components/disaster-map"), {
   ssr: false,
   loading: () => (
-    <div className="flex h-[420px] sm:h-[480px] lg:h-[520px] w-full flex-col items-center justify-center rounded-2xl border border-white/10 bg-[#101522] text-slate-400 shadow-2xl">
-      <div className="h-8 w-8 rounded-full border-2 border-red-500 border-t-transparent animate-spin mb-3"></div>
-      <p className="text-sm font-medium text-slate-300">Loading Interactive Disaster Map...</p>
-      <p className="text-xs text-slate-500 mt-1">Initializing MapLibre GL engine</p>
+    <div className="flex h-[420px] sm:h-[480px] lg:h-[540px] w-full flex-col items-center justify-center rounded-2xl border border-white/10 bg-[#0c1220] text-slate-400 shadow-2xl">
+      <div className="h-8 w-8 rounded-full border-2 border-sky-500 border-t-transparent animate-spin mb-3"></div>
+      <p className="text-sm font-semibold text-slate-200">Loading Geospatial Engine...</p>
+      <p className="text-xs text-slate-500 mt-1">Initializing MapLibre GL telemetry layer</p>
     </div>
   ),
 });
 
-const severityValues = [1, 2, 3, 4, 5] as const;
-
-function getSeverityBadge(severity: number) {
-  switch (severity) {
-    case 1:
-      return { label: "Low", cls: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" };
-    case 2:
-      return { label: "Medium", cls: "bg-amber-500/10 text-amber-400 border-amber-500/20" };
-    case 3:
-      return { label: "High", cls: "bg-orange-500/10 text-orange-400 border-orange-500/20" };
-    default:
-      return { label: "Critical", cls: "bg-red-500/10 text-red-400 border-red-500/20" };
-  }
-}
-
 function getTypeIcon(type: string): string {
-  const t = type.toLowerCase();
-  if (t.includes("flood") || t.includes("water")) return "\u{1F30A}";
-  if (t.includes("fire")) return "\u{1F525}";
-  if (t.includes("earthquake")) return "\u{1F3E2}";
-  if (t.includes("cyclone") || t.includes("storm")) return "\u{1F300}";
-  if (t.includes("medical") || t.includes("health")) return "\u{1F691}";
-  if (t.includes("collapse")) return "\u{1F3E2}";
-  if (t.includes("accident")) return "\u{1F697}";
-  return "\u{26A0}\u{FE0F}";
+  const t = (type || "").toLowerCase();
+  if (t.includes("flood") || t.includes("water")) return "🌊";
+  if (t.includes("fire")) return "🔥";
+  if (t.includes("earthquake")) return "🏚️";
+  if (t.includes("cyclone") || t.includes("storm") || t.includes("hurricane")) return "🌀";
+  if (t.includes("medical") || t.includes("health")) return "🚑";
+  if (t.includes("collapse") || t.includes("building")) return "🏢";
+  if (t.includes("accident") || t.includes("crash")) return "🚗";
+  return "⚠️";
 }
 
 export default function IncidentsPage() {
@@ -49,192 +37,329 @@ export default function IncidentsPage() {
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [mapRefreshTrigger, setMapRefreshTrigger] = useState(0);
-  const [refreshLabel, setRefreshLabel] = useState("No incidents yet");
-  const [errorMessage] = useState<string | null>(null);
-
-  const totals = useMemo(() => {
-    const bySeverity = severityValues.reduce<Record<number, number>>(
-      (acc, s) => ({ ...acc, [s]: 0 }),
-      {}
-    );
-    let total = 0;
-    let critical = 0;
-    let high = 0;
-    incidents.forEach((inc) => {
-      const sev = typeof inc.severity === "number" ? inc.severity : 0;
-      total += 1;
-      if (sev >= 5) critical += 1;
-      else if (sev === 4) high += 1;
-      bySeverity[sev] = (bySeverity[sev] ?? 0) + 1;
-    });
-    return { total, critical, high, bySeverity };
-  }, [incidents]);
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [severityFilter, setSeverityFilter] = useState<string>("all");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [hasLoaded, setHasLoaded] = useState(false);
 
   const handleIncidentsLoaded = useCallback((incs: Incident[]) => {
     setIncidents(incs);
-    setRefreshLabel(incs.length === 0 ? "No incidents yet" : incs.length + " incidents synced");
+    setHasLoaded(true);
   }, []);
 
-  const refresh = useCallback(() => {
+  const refreshMap = useCallback(() => {
     setMapRefreshTrigger((n) => n + 1);
   }, []);
 
+  // Compute metrics
+  const stats = useMemo(() => {
+    let total = 0;
+    let critical = 0;
+    let high = 0;
+    let active = 0;
+    let resolved = 0;
+
+    incidents.forEach((inc) => {
+      total += 1;
+      const sev = typeof inc.severity === "number" ? inc.severity : 0;
+      if (sev >= 4) critical += 1;
+      else if (sev === 3) high += 1;
+
+      const st = (inc.status || "reported").toLowerCase();
+      if (st === "resolved") resolved += 1;
+      else if (st !== "cancelled") active += 1;
+    });
+
+    return { total, critical, high, active, resolved };
+  }, [incidents]);
+
+  // Filtered incidents
+  const filteredIncidents = useMemo(() => {
+    return incidents.filter((inc) => {
+      // Status filter
+      if (statusFilter !== "all") {
+        const incStatus = (inc.status || "reported").toLowerCase();
+        if (incStatus !== statusFilter) return false;
+      }
+
+      // Severity filter
+      const sev = typeof inc.severity === "number" ? inc.severity : 1;
+      if (severityFilter === "critical" && sev < 4) return false;
+      if (severityFilter === "high" && sev !== 3) return false;
+      if (severityFilter === "medium" && sev !== 2) return false;
+      if (severityFilter === "low" && sev !== 1) return false;
+
+      // Search query
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const matchesType = (inc.type || "").toLowerCase().includes(q);
+        const matchesDesc = (inc.description || "").toLowerCase().includes(q);
+        const matchesId = (inc.id || "").toLowerCase().includes(q);
+        const matchesNote = (inc.note || "").toLowerCase().includes(q);
+        if (!matchesType && !matchesDesc && !matchesId && !matchesNote) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [incidents, statusFilter, severityFilter, searchQuery]);
+
+  const selectedIncident = useMemo(() => {
+    return incidents.find((i) => i.id === selectedIncidentId) || null;
+  }, [incidents, selectedIncidentId]);
+
   return (
-    <main className="min-h-screen bg-[#05070d] text-white">
-      <header className="border-b border-white/10 bg-[#080b14]/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">AIAC</h1>
-            <p className="text-sm text-slate-400">Smart Disaster Response - Incident Directory</p>
+    <main className="min-h-screen bg-[#070b14] text-white flex flex-col">
+      <Navbar
+        currentSection="Incident Directory"
+        actionButton={
+          <button
+            onClick={refreshMap}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-sky-500/30 bg-sky-500/10 hover:bg-sky-500/20 text-xs font-semibold text-sky-300 transition"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            <span>Sync Live Feed</span>
+          </button>
+        }
+      />
+
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 py-6 w-full flex-1 flex flex-col gap-6">
+        {/* KPI SUMMARY CARDS */}
+        <section className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-3">
+          <div className="rounded-xl border border-white/10 bg-[#0e1424] p-4 shadow-sm">
+            <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Total Recorded</span>
+            <p className="mt-1 text-2xl font-extrabold text-white">{stats.total}</p>
+            <span className="text-[10px] text-slate-500">Live incidents on grid</span>
           </div>
-          <div className="flex items-center gap-3">
-            {isCommandCenter && (
-              <Link
-                href="/command"
-                className="hidden rounded-lg border border-purple-500/40 bg-purple-950/40 px-3.5 py-2 text-xs font-semibold text-purple-200 transition hover:bg-purple-900/60 sm:inline-flex items-center gap-1.5"
+
+          <div className="rounded-xl border border-amber-500/20 bg-amber-950/20 p-4 shadow-sm">
+            <span className="text-[11px] font-semibold text-amber-400 uppercase tracking-wider">Active Operations</span>
+            <p className="mt-1 text-2xl font-extrabold text-amber-300">{stats.active}</p>
+            <span className="text-[10px] text-amber-400/60">Triage &amp; field action</span>
+          </div>
+
+          <div className="rounded-xl border border-red-500/20 bg-red-950/20 p-4 shadow-sm">
+            <span className="text-[11px] font-semibold text-red-400 uppercase tracking-wider">Critical Severity</span>
+            <p className="mt-1 text-2xl font-extrabold text-red-300">{stats.critical}</p>
+            <span className="text-[10px] text-red-400/60">Severity level 4 - 5</span>
+          </div>
+
+          <div className="rounded-xl border border-orange-500/20 bg-orange-950/20 p-4 shadow-sm">
+            <span className="text-[11px] font-semibold text-orange-400 uppercase tracking-wider">High Severity</span>
+            <p className="mt-1 text-2xl font-extrabold text-orange-300">{stats.high}</p>
+            <span className="text-[10px] text-orange-400/60">Severity level 3</span>
+          </div>
+
+          <div className="hidden lg:block rounded-xl border border-emerald-500/20 bg-emerald-950/20 p-4 shadow-sm">
+            <span className="text-[11px] font-semibold text-emerald-400 uppercase tracking-wider">Resolved</span>
+            <p className="mt-1 text-2xl font-extrabold text-emerald-300">{stats.resolved}</p>
+            <span className="text-[10px] text-emerald-400/60">Cleared emergencies</span>
+          </div>
+        </section>
+
+        {/* SEARCH & FILTERS BAR */}
+        <section className="rounded-xl border border-white/10 bg-[#0e1424] p-3.5 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 shadow-md">
+          {/* Status Tabs */}
+          <div className="flex flex-wrap items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
+            <span className="text-xs font-semibold text-slate-400 mr-1.5">Status:</span>
+            {[
+              { id: "all", label: "All" },
+              { id: "reported", label: "Reported" },
+              { id: "verified", label: "Verified" },
+              { id: "assigned", label: "Assigned" },
+              { id: "in_progress", label: "In Progress" },
+              { id: "resolved", label: "Resolved" },
+            ].map((st) => (
+              <button
+                key={st.id}
+                onClick={() => setStatusFilter(st.id)}
+                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                  statusFilter === st.id
+                    ? "bg-sky-600 text-white shadow-md shadow-sky-900/40"
+                    : "bg-white/5 text-slate-400 hover:bg-white/10 hover:text-white"
+                }`}
               >
-                <span>🛡️</span> Command Center
-              </Link>
-            )}
-            {isResponder && (
-              <Link
-                href="/responder"
-                className="hidden rounded-lg border border-blue-500/40 bg-blue-950/40 px-3.5 py-2 text-xs font-semibold text-blue-200 transition hover:bg-blue-900/60 sm:inline-flex items-center gap-1.5"
-              >
-                <span>🚒</span> Responder Console
-              </Link>
-            )}
-            <Link
-              href="/"
-              className="rounded-lg border border-white/10 bg-white/5 px-3.5 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/10 hover:text-white"
+                {st.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Right Filters */}
+          <div className="flex items-center gap-2">
+            <select
+              value={severityFilter}
+              onChange={(e) => setSeverityFilter(e.target.value)}
+              className="rounded-lg border border-white/10 bg-[#070b14] px-3 py-1.5 text-xs text-slate-300 outline-none focus:border-sky-500"
             >
-              Citizen Home
-            </Link>
-            <div className="hidden items-center gap-2 rounded-full border border-green-500/20 bg-green-500/10 px-4 py-2 text-sm text-green-400 lg:flex">
-              <span className="h-2 w-2 rounded-full bg-green-400"></span>
-              System Online
+              <option value="all">All Severities</option>
+              <option value="critical">Critical (4-5)</option>
+              <option value="high">High (3)</option>
+              <option value="medium">Medium (2)</option>
+              <option value="low">Low (1)</option>
+            </select>
+
+            <div className="relative flex-1 sm:w-64">
+              <input
+                type="text"
+                placeholder="Search emergency feed..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full rounded-lg border border-white/10 bg-[#070b14] pl-8 pr-3 py-1.5 text-xs text-white placeholder:text-slate-500 outline-none focus:border-sky-500"
+              />
+              <svg className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
             </div>
-            <button
-              onClick={refresh}
-              className="rounded-lg bg-red-600 px-5 py-2.5 font-semibold transition hover:bg-red-700 text-sm"
-            >
-              Refresh Incidents
-            </button>
           </div>
-        </div>
-      </header>
+        </section>
 
-      <div className="mx-auto max-w-7xl px-6 py-8">
-        <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h2 className="text-2xl font-bold">All Reported Incidents</h2>
-            <p className="mt-1 text-sm text-slate-400">Live emergency feed</p>
-          </div>
-          <div className="flex flex-wrap items-center gap-3 text-sm">
-            <span className="text-slate-400">
-              <strong className="text-white">{totals.total}</strong> total
-            </span>
-            <span className="text-red-400">
-              <strong>{totals.critical}</strong> critical
-            </span>
-            <span className="text-orange-400">
-              <strong>{totals.high}</strong> high
-            </span>
-            <span className="text-xs text-slate-500">{refreshLabel}</span>
-          </div>
-        </div>
-
-        <div className="grid gap-6 lg:grid-cols-3">
-          <div className="lg:col-span-2">
-            <DisasterMap
-              selectedIncidentId={selectedIncidentId}
-              onIncidentSelect={(inc) =>
-                setSelectedIncidentId(inc ? inc.id : null)
-              }
-              onIncidentsLoaded={handleIncidentsLoaded}
-              refreshTrigger={mapRefreshTrigger}
-            />
-          </div>
-
-          <div className="flex flex-col rounded-2xl border border-white/10 bg-[#101522] overflow-hidden max-h-[600px]">
-            <div className="border-b border-white/10 p-5">
-              <h3 className="font-bold text-white">All Incidents</h3>
-              <p className="text-xs text-slate-400">Real-time emergency feed</p>
+        {/* MAIN TWO-COLUMN WORKSPACE: MAP (LEFT) & FEED (RIGHT) */}
+        <section className="grid gap-6 lg:grid-cols-3 flex-1 items-start">
+          {/* MAP COLUMN */}
+          <div className="lg:col-span-2 flex flex-col rounded-2xl border border-white/10 bg-[#0e1424] overflow-hidden shadow-xl">
+            <div className="flex items-center justify-between border-b border-white/10 px-5 py-3.5 bg-[#0a0f1d]">
+              <div className="flex items-center gap-2.5">
+                <div className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></div>
+                <h2 className="text-sm font-bold text-white tracking-wide">Live Geospatial Response Map</h2>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-slate-400">
+                <span>Displaying {filteredIncidents.length} pinned incidents</span>
+              </div>
             </div>
 
-            {selectedIncidentId && (isCommandCenter || isResponder) && (
-              <div className="border-b border-purple-500/30 bg-purple-950/30 px-4 py-2 flex items-center justify-between text-xs">
-                <span className="text-purple-300">Operational action:</span>
-                <div className="flex items-center gap-2">
+            <div className="relative">
+              <DisasterMap
+                selectedIncidentId={selectedIncidentId}
+                onIncidentSelect={(inc) => setSelectedIncidentId(inc ? inc.id : null)}
+                onIncidentsLoaded={handleIncidentsLoaded}
+                refreshTrigger={mapRefreshTrigger}
+              />
+            </div>
+          </div>
+
+          {/* INCIDENT FEED COLUMN */}
+          <div className="flex flex-col rounded-2xl border border-white/10 bg-[#0e1424] overflow-hidden shadow-xl h-[620px]">
+            <div className="border-b border-white/10 px-5 py-3.5 bg-[#0a0f1d] flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-sm text-white">Emergency Feed</h3>
+                <p className="text-[11px] text-slate-400">
+                  {filteredIncidents.length} incidents matching current filter
+                </p>
+              </div>
+              {(isCommandCenter || isResponder) && (
+                <div className="flex items-center gap-1.5">
                   {isCommandCenter && (
                     <Link
                       href="/command"
-                      className="rounded bg-purple-600/80 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-purple-600 transition"
+                      className="rounded-lg bg-sky-500/15 border border-sky-500/30 px-2 py-1 text-[11px] font-semibold text-sky-300 hover:bg-sky-500/25 transition"
                     >
-                      Command Center &rarr;
+                      Command HQ →
                     </Link>
                   )}
                   {isResponder && (
                     <Link
                       href="/responder"
-                      className="rounded bg-blue-600/80 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-blue-600 transition"
+                      className="rounded-lg bg-orange-500/15 border border-orange-500/30 px-2 py-1 text-[11px] font-semibold text-orange-300 hover:bg-orange-500/25 transition"
                     >
-                      Responder Console &rarr;
+                      Field Unit →
                     </Link>
                   )}
                 </div>
-              </div>
-            )}
+              )}
+            </div>
 
-            <div className="flex-1 space-y-3 overflow-y-auto p-4">
-              {incidents.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-center text-slate-500">
-                  <span className="text-3xl mb-2">{getTypeIcon("unknown")}</span>
-                  <p className="font-medium text-slate-400">No incidents reported</p>
-                  <p className="text-xs mt-1 max-w-[200px]">
-                    New emergencies will appear here.
+            <div className="flex-1 space-y-2.5 overflow-y-auto p-3.5">
+              {!hasLoaded ? (
+                // SKELETON LOADERS
+                <div className="space-y-3 p-2">
+                  {[1, 2, 3, 4].map((i) => (
+                    <div key={i} className="animate-pulse rounded-xl border border-white/5 bg-white/[0.02] p-4 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <div className="h-4 w-28 bg-white/10 rounded"></div>
+                        <div className="h-4 w-16 bg-white/10 rounded-full"></div>
+                      </div>
+                      <div className="h-3 w-full bg-white/5 rounded"></div>
+                      <div className="h-3 w-2/3 bg-white/5 rounded"></div>
+                    </div>
+                  ))}
+                </div>
+              ) : filteredIncidents.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-20 text-center text-slate-500 px-4">
+                  <div className="w-12 h-12 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center text-2xl mb-3">
+                    🛰️
+                  </div>
+                  <p className="font-semibold text-slate-300 text-sm">No Incidents in this View</p>
+                  <p className="text-xs text-slate-500 mt-1 max-w-[220px]">
+                    No emergency records match your current filter settings.
                   </p>
+                  <button
+                    onClick={() => {
+                      setStatusFilter("all");
+                      setSeverityFilter("all");
+                      setSearchQuery("");
+                    }}
+                    className="mt-4 text-xs font-semibold text-sky-400 hover:text-sky-300 underline"
+                  >
+                    Clear all filters
+                  </button>
                 </div>
               ) : (
-                incidents.map((inc) => {
+                filteredIncidents.map((inc) => {
                   const isSelected = selectedIncidentId === inc.id;
-                  const badge = getSeverityBadge(inc.severity as number);
 
                   return (
                     <button
                       key={inc.id}
                       type="button"
                       onClick={() =>
-                        setSelectedIncidentId((prev) =>
-                          prev === inc.id ? null : inc.id
-                        )
+                        setSelectedIncidentId((prev) => (prev === inc.id ? null : inc.id))
                       }
-                      className={`w-full rounded-xl border p-4 text-left transition ${
+                      className={`w-full rounded-xl border p-3.5 text-left transition ${
                         isSelected
-                          ? "border-blue-500/80 bg-blue-950/40 ring-2 ring-blue-500/50"
-                          : "border-white/5 bg-white/[0.03] hover:border-white/20"
+                          ? "border-sky-500/80 bg-sky-950/30 ring-2 ring-sky-500/40 shadow-lg"
+                          : "border-white/5 bg-white/[0.02] hover:border-white/15 hover:bg-white/[0.04]"
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-semibold flex items-center gap-1.5">
-                          <span>{getTypeIcon(inc.type)}</span>
-                          <span className="truncate">{inc.type}</span>
-                        </span>
-                        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${badge.cls}`}>
-                          {badge.label}
-                        </span>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-lg">{getTypeIcon(inc.type)}</span>
+                          <div>
+                            <span className="text-xs font-bold text-white capitalize block leading-tight">
+                              {inc.type}
+                            </span>
+                            <span className="text-[10px] text-slate-500 font-mono">
+                              ID: {inc.id.slice(0, 8)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          <SeverityBadge severity={inc.severity} size="sm" />
+                          <StatusBadge status={inc.status} size="sm" showIcon={false} />
+                        </div>
                       </div>
 
-                      <p className="mt-2 text-xs text-slate-300 line-clamp-2">
+                      <p className="mt-2 text-xs text-slate-300 line-clamp-2 leading-relaxed">
                         {inc.description || "No description provided."}
                       </p>
 
-                      <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-2 text-[10px] text-slate-400">
-                        <span className="capitalize">{inc.status || "Reported"}</span>
-                        <span className="font-mono">
-                          {typeof inc.latitude === "number" && typeof inc.longitude === "number"
-                            ? inc.latitude.toFixed(3) + ", " + inc.longitude.toFixed(3)
-                            : "No coords"}
+                      <div className="mt-2.5 flex items-center justify-between border-t border-white/5 pt-2 text-[10px] text-slate-400">
+                        <span className="font-mono flex items-center gap-1">
+                          <span>📍</span>
+                          <span>
+                            {typeof inc.latitude === "number" && typeof inc.longitude === "number"
+                              ? `${inc.latitude.toFixed(3)}, ${inc.longitude.toFixed(3)}`
+                              : "No coordinates"}
+                          </span>
+                        </span>
+
+                        <span>
+                          {inc.created_at
+                            ? new Date(inc.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                            : ""}
                         </span>
                       </div>
                     </button>
@@ -243,11 +368,101 @@ export default function IncidentsPage() {
               )}
             </div>
           </div>
-        </div>
+        </section>
       </div>
-      {errorMessage && (
-        <div className="fixed bottom-6 right-6 z-50 rounded-xl border border-red-500/50 bg-red-500/10 p-4 text-red-300 shadow-2xl">
-          {errorMessage}
+
+      {/* DETAILED INSPECTION DRAWER / MODAL */}
+      {selectedIncident && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="w-full max-w-lg rounded-2xl border border-white/15 bg-[#0d1424] p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between border-b border-white/10 pb-4">
+              <div>
+                <span className="text-[11px] font-bold text-sky-400 uppercase tracking-wider">
+                  RescueGrid Incident Details
+                </span>
+                <h3 className="text-lg font-bold text-white flex items-center gap-2 mt-1 capitalize">
+                  <span className="text-2xl">{getTypeIcon(selectedIncident.type)}</span>
+                  <span>{selectedIncident.type}</span>
+                </h3>
+              </div>
+              <button
+                onClick={() => setSelectedIncidentId(null)}
+                aria-label="Close modal"
+                className="text-slate-400 hover:text-white text-2xl px-2 rounded-lg hover:bg-white/5"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <StatusBadge status={selectedIncident.status} size="md" />
+              <SeverityBadge severity={selectedIncident.severity} size="md" showScore />
+            </div>
+
+            <div className="space-y-1">
+              <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Description</span>
+              <p className="text-xs text-slate-200 bg-white/5 p-3 rounded-xl border border-white/5 leading-relaxed">
+                {selectedIncident.description || "No situation description recorded."}
+              </p>
+            </div>
+
+            {selectedIncident.note && (
+              <div className="space-y-1">
+                <span className="text-[10px] font-semibold text-amber-400 uppercase tracking-wider">Operational Notes</span>
+                <p className="text-xs text-amber-200/90 bg-amber-950/20 p-3 rounded-xl border border-amber-500/20 leading-relaxed italic">
+                  &ldquo;{selectedIncident.note}&rdquo;
+                </p>
+              </div>
+            )}
+
+            <div className="space-y-1">
+              <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Location &amp; Telemetry</span>
+              <div className="bg-white/5 p-3 rounded-xl border border-white/5 text-[11px] font-mono text-slate-300 space-y-1">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Incident ID:</span>
+                  <span className="text-white">{selectedIncident.id}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Coordinates:</span>
+                  <span className="text-white">{selectedIncident.latitude.toFixed(5)}, {selectedIncident.longitude.toFixed(5)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Reported At:</span>
+                  <span className="text-white">
+                    {selectedIncident.created_at ? new Date(selectedIncident.created_at).toLocaleString() : "Unknown"}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="border-t border-white/10 pt-4 flex items-center justify-between">
+              <div>
+                {isCommandCenter && (
+                  <Link
+                    href="/command"
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-sky-400 hover:text-sky-300"
+                  >
+                    Open in Command Center →
+                  </Link>
+                )}
+                {!isCommandCenter && isResponder && (
+                  <Link
+                    href="/responder"
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-orange-400 hover:text-orange-300"
+                  >
+                    Open in Responder Console →
+                  </Link>
+                )}
+              </div>
+
+              <button
+                onClick={() => setSelectedIncidentId(null)}
+                className="rounded-lg bg-white/10 px-4 py-2 text-xs font-semibold text-slate-200 hover:bg-white/20 transition"
+              >
+                Close
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </main>

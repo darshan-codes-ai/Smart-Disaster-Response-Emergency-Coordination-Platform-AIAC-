@@ -1,29 +1,30 @@
 "use client";
 
-import { useState } from "react";
-import Link from "next/link";
+import { FormEvent, useCallback, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
-import type { Incident } from "../components/disaster-map";
-import { getAccessToken, requestWithToken } from "../lib/supabase/access-token";
+import Link from "next/link";
+import { createClient } from "../lib/supabase/client";
 import { useCurrentUser } from "../lib/supabase/use-current-user";
+import type { Incident } from "../components/disaster-map";
+import Navbar from "../components/navbar";
+import StatusBadge from "../components/status-badge";
+import SeverityBadge from "../components/severity-badge";
 
 const DisasterMap = dynamic(() => import("../components/disaster-map"), {
   ssr: false,
   loading: () => (
-    <div className="flex h-[420px] sm:h-[480px] lg:h-[520px] w-full flex-col items-center justify-center rounded-2xl border border-white/10 bg-[#101522] text-slate-400 shadow-2xl">
-      <div className="h-8 w-8 rounded-full border-2 border-red-500 border-t-transparent animate-spin mb-3"></div>
-      <p className="text-sm font-medium text-slate-300">Loading Interactive Disaster Map...</p>
-      <p className="text-xs text-slate-500 mt-1">Initializing MapLibre GL engine</p>
+    <div className="flex h-[420px] sm:h-[480px] lg:h-[540px] w-full flex-col items-center justify-center rounded-2xl border border-white/10 bg-[#0c1220] text-slate-400 shadow-2xl">
+      <div className="h-8 w-8 rounded-full border-2 border-sky-500 border-t-transparent animate-spin mb-3"></div>
+      <p className="text-sm font-semibold text-slate-200">Loading Geospatial Engine...</p>
+      <p className="text-xs text-slate-500 mt-1">Initializing MapLibre GL telemetry layer</p>
     </div>
   ),
 });
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
-type Location = {
-  lat: number;
-  lng: number;
-};
+interface Location {
+  latitude: number;
+  longitude: number;
+}
 
 const emergencyTypes = [
   "Flood",
@@ -33,636 +34,399 @@ const emergencyTypes = [
   "Medical Emergency",
   "Building Collapse",
   "Road Accident",
-  "Other",
-];
+] as const;
 
-function getSidebarSeverityBadge(severity: number) {
-  switch (severity) {
-    case 1:
-      return {
-        label: "Low",
-        badgeClass: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
-      };
-    case 2:
-      return {
-        label: "Medium",
-        badgeClass: "bg-amber-500/10 text-amber-400 border-amber-500/20",
-      };
-    case 3:
-      return {
-        label: "High",
-        badgeClass: "bg-orange-500/10 text-orange-400 border-orange-500/20",
-      };
-    case 4:
-    case 5:
-    default:
-      return {
-        label: "Critical",
-        badgeClass: "bg-red-500/10 text-red-400 border-red-500/20",
-      };
-  }
-}
-
-function getSidebarTypeIcon(type: string): string {
-  const t = type.toLowerCase();
+function getTypeIcon(type: string): string {
+  const t = (type || "").toLowerCase();
   if (t.includes("flood") || t.includes("water")) return "🌊";
   if (t.includes("fire")) return "🔥";
   if (t.includes("earthquake")) return "🏚️";
-  if (t.includes("cyclone") || t.includes("storm")) return "🌀";
+  if (t.includes("cyclone") || t.includes("storm") || t.includes("hurricane")) return "🌀";
   if (t.includes("medical") || t.includes("health")) return "🚑";
-  if (t.includes("collapse")) return "🏢";
-  if (t.includes("accident")) return "🚗";
+  if (t.includes("collapse") || t.includes("building")) return "🏢";
+  if (t.includes("accident") || t.includes("crash")) return "🚗";
   return "⚠️";
 }
 
 export default function Home() {
-  // ============================================================
-  // STATE
-  // ============================================================
-
-  const { isCommandCenter, isResponder } = useCurrentUser();
+  const { profile, isCommandCenter, isResponder } = useCurrentUser();
   const [showReportModal, setShowReportModal] = useState(false);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [incidentsList, setIncidentsList] = useState<Incident[]>([]);
   const [mapRefreshTrigger, setMapRefreshTrigger] = useState(0);
 
   const [emergencyType, setEmergencyType] = useState("Flood");
-
   const [description, setDescription] = useState("");
-
   const [location, setLocation] = useState<Location | null>(null);
-
-  const [locationStatus, setLocationStatus] =
-    useState("Location not detected");
-
+  const [locationStatus, setLocationStatus] = useState("Location not detected");
   const [submitting, setSubmitting] = useState(false);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [feedFilter, setFeedFilter] = useState<"all" | "my">("all");
 
-  const [successMessage, setSuccessMessage] =
-    useState("");
-
-  const [errorMessage, setErrorMessage] =
-    useState("");
-
-  // ============================================================
-  // DETECT LOCATION
-  // ============================================================
-
-  const detectLocation = () => {
-    setLocationStatus("Detecting location...");
-    setErrorMessage("");
-
+  const detectLocation = useCallback(() => {
     if (!navigator.geolocation) {
-      setLocationStatus("Location not supported");
-      setErrorMessage(
-        "Geolocation is not supported by your browser."
-      );
+      setLocationStatus("Geolocation is not supported by your browser");
       return;
     }
 
+    setLocationStatus("Detecting current coordinates...");
     navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const newLocation = {
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-        };
-
-        setLocation(newLocation);
-
-        setLocationStatus(
-          `${newLocation.lat.toFixed(5)}, ${newLocation.lng.toFixed(5)}`
-        );
+      (pos) => {
+        setLocation({
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+        });
+        setLocationStatus("GPS coordinates locked successfully");
       },
-
-      (error) => {
-        console.error("Location error:", error);
-
-        setLocationStatus("Unable to detect location");
-
-        setErrorMessage(
-          "Unable to detect your location. Please allow location access and try again."
-        );
+      (err) => {
+        console.warn("Geolocation prompt error:", err.message);
+        setLocationStatus("Unable to retrieve location. Set manually or check GPS permissions.");
       },
-
-      {
-        enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 0,
-      }
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
     );
-  };
+  }, []);
 
-  // ============================================================
-  // OPEN EMERGENCY FORM
-  // ============================================================
-
-  const openReportModal = () => {
+  const openReportModal = useCallback(() => {
     setShowReportModal(true);
-
-    setSuccessMessage("");
-    setErrorMessage("");
-
-    // Automatically request location
-    detectLocation();
-  };
-
-  // ============================================================
-  // CLOSE EMERGENCY FORM
-  // ============================================================
-
-  const closeReportModal = () => {
-    if (submitting) return;
-
-    setShowReportModal(false);
-    setErrorMessage("");
-    setSuccessMessage("");
-  };
-
-  // ============================================================
-  // SUBMIT EMERGENCY
-  // ============================================================
-
-  const handleSubmit = async () => {
-    setErrorMessage("");
-    setSuccessMessage("");
-
-    // Validate description
-    if (!description.trim()) {
-      setErrorMessage(
-        "Please describe the emergency."
-      );
-      return;
-    }
-
-    // Validate location
+    setErrorMessage(null);
     if (!location) {
-      setErrorMessage(
-        "Please detect your location before submitting."
-      );
+      detectLocation();
+    }
+  }, [detectLocation, location]);
+
+  const handleIncidentsLoaded = useCallback((incs: Incident[]) => {
+    setIncidentsList(incs);
+  }, []);
+
+  const handleSubmitReport = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!location) {
+      setErrorMessage("Please allow location detection or provide valid coordinates.");
       return;
     }
 
     setSubmitting(true);
+    setErrorMessage(null);
 
     try {
-      // --------------------------------------------------------
-      // SEND REQUEST TO FASTAPI
-      // --------------------------------------------------------
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
 
-      const accessToken = await getAccessToken();
-
-      if (!accessToken) {
-        throw new Error("Your login session has expired. Please log in again.");
-      }
-
-      const requestBody = JSON.stringify({
+      const newRecord = {
         type: emergencyType,
-        description: description.trim(),
-        location: {
-          lat: location.lat,
-          lng: location.lng,
-        },
-        severity: 3,
-      });
+        description: description.trim() || `${emergencyType} reported by citizen`,
+        latitude: location.latitude,
+        longitude: location.longitude,
+        severity: emergencyType === "Medical Emergency" || emergencyType === "Building Collapse" ? 4 : 3,
+        status: "reported",
+        user_id: user?.id || null,
+      };
 
-      let response = await requestWithToken(
-        API_URL + "/incidents",
-        accessToken,
-        {
-          method: "POST",
-          body: requestBody,
-        }
-      );
+      const { data, error } = await supabase
+        .from("incidents")
+        .insert([newRecord])
+        .select()
+        .single();
 
-      if (response.status === 401) {
-        const freshToken = await getAccessToken(true);
-        if (freshToken) {
-          response = await requestWithToken(
-            API_URL + "/incidents",
-            freshToken,
-            {
-              method: "POST",
-              body: requestBody,
-            }
-          );
-        }
-      }
-      // --------------------------------------------------------
-      // READ RESPONSE
-      // --------------------------------------------------------
+      if (error) throw error;
 
-      const data = await response.json();
-
-      console.log(
-        "Backend response:",
-        data
-      );
-
-      // --------------------------------------------------------
-      // HANDLE BACKEND ERROR
-      // --------------------------------------------------------
-
-      if (!response.ok) {
-        throw new Error(
-          data?.detail ||
-            "Failed to submit emergency report."
-        );
-      }
-
-      // --------------------------------------------------------
-      // GET INCIDENT ID SAFELY
-      // --------------------------------------------------------
-
-      const incidentId =
-        data?.incident?.id;
-
-      if (!incidentId) {
-        console.error(
-          "Unexpected backend response:",
-          data
-        );
-
-        throw new Error(
-          "Emergency was submitted, but no incident ID was returned."
-        );
-      }
-
-      // --------------------------------------------------------
-      // SUCCESS
-      // --------------------------------------------------------
-
-      setSuccessMessage(
-        `Emergency reported successfully! Incident ID: ${incidentId}`
-      );
-
-      // Trigger map refresh to load the new incident immediately
+      setShowReportModal(false);
+      setDescription("");
+      setSuccessMessage("Emergency incident registered on RescueGrid. Dispatch teams alerted.");
       setMapRefreshTrigger((prev) => prev + 1);
 
-      // Clear description
-      setDescription("");
+      if (data) {
+        setSelectedIncidentId(data.id);
+      }
 
-      // Keep modal open so user can see the incident ID
-    } catch (error) {
-      console.error(
-        "Emergency submission error:",
-        error
-      );
-
-      setErrorMessage(
-        error instanceof Error
-          ? error.message
-          : "Something went wrong while submitting the emergency."
-      );
+      setTimeout(() => setSuccessMessage(null), 5000);
+    } catch (err) {
+      console.error("Incident reporting error:", err);
+      setErrorMessage(err instanceof Error ? err.message : "Failed to record incident");
     } finally {
       setSubmitting(false);
     }
   };
 
-  // ============================================================
-  // MAIN UI
-  // ============================================================
+  const stats = useMemo(() => {
+    const total = incidentsList.length;
+    let active = 0;
+    let reported = 0;
+    let resolved = 0;
+    let critical = 0;
+
+    incidentsList.forEach((inc) => {
+      const st = (inc.status || "reported").toLowerCase();
+      if (st !== "resolved" && st !== "cancelled") active++;
+      if (st === "reported") reported++;
+      if (st === "resolved") resolved++;
+      if (typeof inc.severity === "number" && inc.severity >= 4) critical++;
+    });
+
+    return { total, active, reported, resolved, critical };
+  }, [incidentsList]);
+
+  const displayedIncidents = useMemo(() => {
+    if (feedFilter === "my" && profile?.id) {
+      return incidentsList.filter((inc) => inc.user_id === profile.id);
+    }
+    return incidentsList;
+  }, [incidentsList, feedFilter, profile]);
 
   return (
-    <main className="min-h-screen bg-[#05070d] text-white">
+    <main className="min-h-screen bg-[#070b14] text-white flex flex-col">
+      <Navbar
+        currentSection="Citizen Dashboard"
+        actionButton={
+          <button
+            onClick={openReportModal}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-xs font-bold text-white transition shadow-md shadow-red-950/40"
+          >
+            <span>🚨</span>
+            <span>Report Incident</span>
+          </button>
+        }
+      />
 
-      {/* ======================================================
-          HEADER
-      ====================================================== */}
-
-      <header className="border-b border-white/10 bg-[#080b14]/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
-
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">
-              🚨 AIAC
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 py-6 w-full flex-1 flex flex-col gap-6">
+        {/* HERO GREETING & SYSTEM BANNER */}
+        <section className="rounded-2xl border border-white/10 bg-gradient-to-r from-[#0d1424] via-[#09101d] to-[#0d1424] p-6 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="inline-block h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="text-xs font-semibold text-emerald-400 uppercase tracking-wider">
+                Emergency System Operational
+              </span>
+            </div>
+            <h1 className="text-2xl font-bold text-white tracking-tight">
+              Welcome back, {profile?.full_name || "Citizen Responder"}
             </h1>
-
-            <p className="text-sm text-slate-400">
-              Smart Disaster Response & Emergency Coordination
+            <p className="text-xs text-slate-400 max-w-2xl">
+              Monitor nearby active disaster response activity, review your reported incidents, or immediately submit a new crisis report with GPS coordinates.
             </p>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5">
             {isCommandCenter && (
               <Link
                 href="/command"
-                className="hidden rounded-lg border border-purple-500/40 bg-purple-950/40 px-3.5 py-2 text-xs font-semibold text-purple-200 transition hover:bg-purple-900/60 sm:inline-flex items-center gap-1.5"
+                className="rounded-xl border border-sky-500/30 bg-sky-500/10 hover:bg-sky-500/20 px-3.5 py-2 text-xs font-semibold text-sky-300 transition flex items-center gap-1.5"
               >
-                <span>🛡️</span> Command Center
+                <span>🛡️</span>
+                <span>Command HQ</span>
               </Link>
             )}
-
             {isResponder && (
               <Link
                 href="/responder"
-                className="hidden rounded-lg border border-blue-500/40 bg-blue-950/40 px-3.5 py-2 text-xs font-semibold text-blue-200 transition hover:bg-blue-900/60 sm:inline-flex items-center gap-1.5"
+                className="rounded-xl border border-orange-500/30 bg-orange-500/10 hover:bg-orange-500/20 px-3.5 py-2 text-xs font-semibold text-orange-300 transition flex items-center gap-1.5"
               >
-                <span>🚒</span> Responder Console
+                <span>🚑</span>
+                <span>Responder Console</span>
               </Link>
             )}
-
-            <Link
-              href="/incidents"
-              className="hidden rounded-lg border border-white/10 bg-white/5 px-3.5 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/10 hover:text-white md:inline-flex"
-            >
-              All Incidents
-            </Link>
-
-            <div className="hidden items-center gap-2 rounded-full border border-green-500/20 bg-green-500/10 px-4 py-2 text-sm text-green-400 md:flex">
-              <span className="h-2 w-2 rounded-full bg-green-400"></span>
-              System Online
-            </div>
-
             <button
               onClick={openReportModal}
-              className="rounded-lg bg-red-600 px-5 py-2.5 font-semibold transition hover:bg-red-700 text-sm"
+              className="rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs px-4 py-2 transition shadow-lg shadow-red-950/50 flex items-center gap-1.5"
             >
-              Report Emergency
+              <span>🚨</span>
+              <span>Report Emergency</span>
             </button>
           </div>
-
-        </div>
-      </header>
-
-
-      {/* ======================================================
-          MAIN CONTENT
-      ====================================================== */}
-
-      <div className="mx-auto max-w-7xl px-6 py-8">
-
-        {/* ----------------------------------------------------
-            CRITICAL ALERT
-        ---------------------------------------------------- */}
-
-        <div className="mb-8 rounded-xl border border-red-500/30 bg-red-950/40 p-5">
-
-          <div className="flex items-start gap-4">
-
-            <div className="text-2xl">
-              ⚠️
-            </div>
-
-            <div>
-
-              <h2 className="font-bold text-red-300">
-                Critical Flood Alert
-              </h2>
-
-              <p className="mt-1 text-sm text-red-200/80">
-                Stay alert and follow local evacuation instructions.
-                Emergency services are monitoring the situation.
-              </p>
-
-            </div>
-
-          </div>
-
-        </div>
-
-
-        {/* ----------------------------------------------------
-            DASHBOARD TITLE
-        ---------------------------------------------------- */}
-
-        <div className="mb-8">
-
-          <p className="mb-2 text-sm font-medium text-blue-400">
-            CITIZEN DASHBOARD
-          </p>
-
-          <h2 className="text-3xl font-bold">
-            Stay Safe. Stay Informed.
-          </h2>
-
-          <p className="mt-2 max-w-2xl text-slate-400">
-            Report emergencies, find nearby emergency resources,
-            and receive important disaster information.
-          </p>
-
-        </div>
-
-
-        {/* ----------------------------------------------------
-            REPORT EMERGENCY CARD
-        ---------------------------------------------------- */}
-
-        <div className="mb-8 rounded-2xl border border-red-500/20 bg-gradient-to-r from-red-950/50 to-slate-900 p-6">
-
-          <div className="flex flex-col items-start justify-between gap-5 md:flex-row md:items-center">
-
-            <div>
-
-              <div className="mb-2 text-3xl">
-                🚨
-              </div>
-
-              <h3 className="text-2xl font-bold">
-                Are you experiencing an emergency?
-              </h3>
-
-              <p className="mt-2 text-slate-400">
-                Report the emergency and share your location
-                with emergency response teams.
-              </p>
-
-            </div>
-
-            <button
-              onClick={openReportModal}
-              className="w-full rounded-xl bg-red-600 px-7 py-4 font-bold transition hover:bg-red-700 md:w-auto"
-            >
-              Report Emergency
-            </button>
-
-          </div>
-
-        </div>
-
-
-        {/* ----------------------------------------------------
-            QUICK ACTIONS
-        ---------------------------------------------------- */}
-
-        <section className="mb-8">
-
-          <h3 className="mb-4 text-xl font-bold">
-            Quick Actions
-          </h3>
-
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-
-            <button
-              onClick={() => {
-                document.getElementById("disaster-map-section")?.scrollIntoView({ behavior: "smooth" });
-              }}
-              className="rounded-xl border border-white/10 bg-[#101522] p-5 text-left transition hover:border-blue-500/40 hover:bg-[#151c2c]"
-            >
-              <div className="mb-3 text-3xl">
-                🗺️
-              </div>
-
-              <h4 className="font-semibold">
-                Disaster Map
-              </h4>
-
-              <p className="mt-1 text-sm text-slate-400">
-                View nearby emergencies
-              </p>
-
-            </button>
-
-
-            <button className="rounded-xl border border-white/10 bg-[#101522] p-5 text-left transition hover:border-blue-500/40 hover:bg-[#151c2c]">
-
-              <div className="mb-3 text-3xl">
-                🏠
-              </div>
-
-              <h4 className="font-semibold">
-                Shelters
-              </h4>
-
-              <p className="mt-1 text-sm text-slate-400">
-                Find nearby shelters
-              </p>
-
-            </button>
-
-
-            <button className="rounded-xl border border-white/10 bg-[#101522] p-5 text-left transition hover:border-blue-500/40 hover:bg-[#151c2c]">
-
-              <div className="mb-3 text-3xl">
-                🏥
-              </div>
-
-              <h4 className="font-semibold">
-                Hospitals
-              </h4>
-
-              <p className="mt-1 text-sm text-slate-400">
-                Find emergency hospitals
-              </p>
-
-            </button>
-
-
-            <button className="rounded-xl border border-white/10 bg-[#101522] p-5 text-left transition hover:border-blue-500/40 hover:bg-[#151c2c]">
-
-              <div className="mb-3 text-3xl">
-                🚶
-              </div>
-
-              <h4 className="font-semibold">
-                Evacuation
-              </h4>
-
-              <p className="mt-1 text-sm text-slate-400">
-                View evacuation information
-              </p>
-
-            </button>
-
-          </div>
-
         </section>
 
+        {/* FEEDBACK TOASTS */}
+        {successMessage && (
+          <div role="status" className="rounded-xl border border-emerald-500/30 bg-emerald-950/80 p-4 text-xs text-emerald-200 flex items-center justify-between shadow-xl">
+            <div className="flex items-center gap-2">
+              <span className="text-base">✓</span>
+              <span className="font-semibold">{successMessage}</span>
+            </div>
+            <button onClick={() => setSuccessMessage(null)} className="text-emerald-400 hover:text-white px-2 text-lg font-bold">×</button>
+          </div>
+        )}
 
-        {/* ----------------------------------------------------
-            MAP + INCIDENTS
-        ---------------------------------------------------- */}
+        {errorMessage && (
+          <div role="alert" className="rounded-xl border border-red-500/30 bg-red-950/80 p-4 text-xs text-red-200 flex items-center justify-between shadow-xl">
+            <div className="flex items-center gap-2">
+              <span className="text-base">⚠️</span>
+              <span className="font-semibold">{errorMessage}</span>
+            </div>
+            <button onClick={() => setErrorMessage(null)} className="text-red-400 hover:text-white px-2 text-lg font-bold">×</button>
+          </div>
+        )}
 
-        <div id="disaster-map-section" className="grid gap-6 lg:grid-cols-3">
-
-          {/* REAL INTERACTIVE MAP */}
-          <div className="lg:col-span-2">
-            <DisasterMap
-              selectedIncidentId={selectedIncidentId}
-              onIncidentSelect={(incident) =>
-                setSelectedIncidentId(incident ? incident.id : null)
-              }
-              onIncidentsLoaded={(incs) => setIncidentsList(incs)}
-              refreshTrigger={mapRefreshTrigger}
-            />
+        {/* 4 KPI SUMMARY CARDS */}
+        <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="rounded-xl border border-white/10 bg-[#0e1424] p-4 shadow-sm">
+            <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Active Incidents</span>
+            <p className="mt-1 text-2xl font-extrabold text-white">{stats.active}</p>
+            <span className="text-[10px] text-slate-500">In triage or field response</span>
           </div>
 
-          {/* NEARBY INCIDENTS LIST */}
-          <div className="flex flex-col rounded-2xl border border-white/10 bg-[#101522] overflow-hidden max-h-[580px]">
+          <div className="rounded-xl border border-red-500/20 bg-red-950/20 p-4 shadow-sm">
+            <span className="text-[11px] font-semibold text-red-400 uppercase tracking-wider">Critical Priority</span>
+            <p className="mt-1 text-2xl font-extrabold text-red-300">{stats.critical}</p>
+            <span className="text-[10px] text-red-400/60">Requires immediate attention</span>
+          </div>
 
-            <div className="border-b border-white/10 p-5 flex items-center justify-between bg-[#0c101c]/80 backdrop-blur">
-              <div>
-                <h3 className="font-bold text-white">
-                  Nearby Incidents
-                </h3>
-                <p className="text-xs text-slate-400">
-                  Real-time emergency feed
-                </p>
+          <div className="rounded-xl border border-amber-500/20 bg-amber-950/20 p-4 shadow-sm">
+            <span className="text-[11px] font-semibold text-amber-400 uppercase tracking-wider">Awaiting Dispatch</span>
+            <p className="mt-1 text-2xl font-extrabold text-amber-300">{stats.reported}</p>
+            <span className="text-[10px] text-amber-400/60">Newly reported crises</span>
+          </div>
+
+          <div className="rounded-xl border border-emerald-500/20 bg-emerald-950/20 p-4 shadow-sm">
+            <span className="text-[11px] font-semibold text-emerald-400 uppercase tracking-wider">Resolved Emergencies</span>
+            <p className="mt-1 text-2xl font-extrabold text-emerald-300">{stats.resolved}</p>
+            <span className="text-[10px] text-emerald-400/60">Cleared &amp; verified safe</span>
+          </div>
+        </section>
+
+        {/* PROMINENT EMERGENCY REPORT CARD */}
+        <section className="rounded-2xl border border-red-500/20 bg-gradient-to-r from-red-950/20 via-[#0e1424] to-[#0e1424] p-5 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-red-600/20 border border-red-500/40 text-2xl text-red-400">
+              🚨
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-white">Witnessing an Emergency or Natural Hazard?</h2>
+              <p className="text-xs text-slate-300 mt-0.5">
+                Every second matters. Submit real-time coordinates, hazard type, and brief situation notes.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={openReportModal}
+            className="rounded-xl bg-red-600 hover:bg-red-500 px-5 py-2.5 font-bold text-xs text-white transition shadow-lg shadow-red-950/50 whitespace-nowrap"
+          >
+            Report Incident Now →
+          </button>
+        </section>
+
+        {/* SPLIT WORKSPACE: MAP (LEFT) & FEED (RIGHT) */}
+        <section className="grid gap-6 lg:grid-cols-3 flex-1 items-start">
+          {/* MAP */}
+          <div className="lg:col-span-2 flex flex-col rounded-2xl border border-white/10 bg-[#0e1424] overflow-hidden shadow-xl">
+            <div className="flex items-center justify-between border-b border-white/10 px-5 py-3.5 bg-[#0a0f1d]">
+              <div className="flex items-center gap-2">
+                <div className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></div>
+                <h2 className="text-sm font-bold text-white tracking-wide">Live Response Map</h2>
               </div>
-
-              <span className="rounded-full bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-400 border border-blue-500/20">
-                {incidentsList.length} Total
+              <span className="text-xs text-slate-400 font-mono">
+                {incidentsList.length} total incidents pinned
               </span>
             </div>
 
-            <div className="space-y-3 p-4 overflow-y-auto flex-1">
-              {incidentsList.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-center text-slate-500">
-                  <span className="text-3xl mb-2">🛡️</span>
-                  <p className="font-medium text-slate-400">No active incidents</p>
-                  <p className="text-xs mt-1 max-w-[200px]">
-                    Use &quot;Report Emergency&quot; above if you are facing an emergency.
+            <div className="relative">
+              <DisasterMap
+                selectedIncidentId={selectedIncidentId}
+                onIncidentSelect={(inc) => setSelectedIncidentId(inc ? inc.id : null)}
+                onIncidentsLoaded={handleIncidentsLoaded}
+                refreshTrigger={mapRefreshTrigger}
+              />
+            </div>
+          </div>
+
+          {/* FEED */}
+          <div className="flex flex-col rounded-2xl border border-white/10 bg-[#0e1424] overflow-hidden shadow-xl h-[580px]">
+            {/* TABS */}
+            <div className="border-b border-white/10 px-4 py-3 bg-[#0a0f1d] flex items-center justify-between">
+              <div className="flex rounded-lg bg-black/40 border border-white/5 p-1 gap-1">
+                <button
+                  onClick={() => setFeedFilter("all")}
+                  className={`rounded-md px-3 py-1 text-xs font-semibold transition ${
+                    feedFilter === "all"
+                      ? "bg-sky-600 text-white"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  All ({incidentsList.length})
+                </button>
+                <button
+                  onClick={() => setFeedFilter("my")}
+                  className={`rounded-md px-3 py-1 text-xs font-semibold transition ${
+                    feedFilter === "my"
+                      ? "bg-sky-600 text-white"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  My Reports
+                </button>
+              </div>
+
+              <Link
+                href="/incidents"
+                className="text-xs font-semibold text-sky-400 hover:text-sky-300"
+              >
+                Directory →
+              </Link>
+            </div>
+
+            {/* LIST */}
+            <div className="flex-1 space-y-2.5 overflow-y-auto p-3.5">
+              {displayedIncidents.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-20 text-center text-slate-500 px-4">
+                  <div className="w-12 h-12 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center text-2xl mb-3">
+                    📋
+                  </div>
+                  <p className="font-semibold text-slate-300 text-sm">
+                    {feedFilter === "my" ? "You Have No Submitted Reports" : "No Incidents Recorded"}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1 max-w-[200px]">
+                    {feedFilter === "my"
+                      ? "Incidents you report will appear here."
+                      : "Emergency incidents will appear on the live feed."}
                   </p>
                 </div>
               ) : (
-                incidentsList.map((inc) => {
+                displayedIncidents.map((inc) => {
                   const isSelected = selectedIncidentId === inc.id;
-                  const config = getSidebarSeverityBadge(inc.severity);
-                  const typeIcon = getSidebarTypeIcon(inc.type);
 
                   return (
                     <button
                       key={inc.id}
                       type="button"
                       onClick={() =>
-                        setSelectedIncidentId((prev) =>
-                          prev === inc.id ? null : inc.id
-                        )
+                        setSelectedIncidentId((prev) => (prev === inc.id ? null : inc.id))
                       }
-                      className={`w-full text-left rounded-xl border p-4 transition-all duration-150 ${
+                      className={`w-full rounded-xl border p-3.5 text-left transition ${
                         isSelected
-                          ? "border-blue-500/80 bg-blue-950/40 ring-2 ring-blue-500/50 shadow-lg shadow-blue-950/50"
-                          : "border-white/5 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.06]"
+                          ? "border-sky-500/80 bg-sky-950/30 ring-2 ring-sky-500/40 shadow-lg"
+                          : "border-white/5 bg-white/[0.02] hover:border-white/15 hover:bg-white/[0.04]"
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-semibold text-white flex items-center gap-1.5 text-sm">
-                          <span>{typeIcon}</span>
-                          <span className="truncate">{inc.type}</span>
-                        </span>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-lg">{getTypeIcon(inc.type)}</span>
+                          <div>
+                            <span className="text-xs font-bold text-white capitalize block leading-tight">
+                              {inc.type}
+                            </span>
+                            <span className="text-[10px] text-slate-500 font-mono">
+                              ID: {inc.id.slice(0, 8)}
+                            </span>
+                          </div>
+                        </div>
 
-                        <span
-                          className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${config.badgeClass}`}
-                        >
-                          {config.label}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <SeverityBadge severity={inc.severity} size="sm" />
+                          <StatusBadge status={inc.status} size="sm" showIcon={false} />
+                        </div>
                       </div>
 
                       <p className="mt-2 text-xs text-slate-300 line-clamp-2 leading-relaxed">
-                        {inc.description || "No description provided."}
+                        {inc.description || "No situation details provided."}
                       </p>
 
-                      <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-2 text-[10px] text-slate-400">
-                        <span className="flex items-center gap-1">
-                          <span>Status:</span>
-                          <strong className="text-slate-200 capitalize font-medium">
-                            {inc.status || "Reported"}
-                          </strong>
+                      <div className="mt-2 flex items-center justify-between border-t border-white/5 pt-2 text-[10px] text-slate-400">
+                        <span className="font-mono flex items-center gap-1">
+                          <span>📍</span>
+                          <span>{inc.latitude.toFixed(3)}, {inc.longitude.toFixed(3)}</span>
                         </span>
-
-                        <span className="font-mono text-slate-400">
-                          {typeof inc.latitude === "number" &&
-                          typeof inc.longitude === "number"
-                            ? `${inc.latitude.toFixed(3)}, ${inc.longitude.toFixed(3)}`
-                            : "No coords"}
+                        <span>
+                          {inc.created_at ? new Date(inc.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}
                         </span>
                       </div>
                     </button>
@@ -670,300 +434,115 @@ export default function Home() {
                 })
               )}
             </div>
-
           </div>
-
-        </div>
-
-
-        {/* ----------------------------------------------------
-            SAFETY INFORMATION
-        ---------------------------------------------------- */}
-
-        <section className="mt-8 rounded-2xl border border-white/10 bg-[#101522] p-6">
-
-          <h3 className="mb-5 text-xl font-bold">
-            🛡️ Emergency Safety Instructions
-          </h3>
-
-          <div className="grid gap-4 md:grid-cols-3">
-
-            <div>
-
-              <h4 className="font-semibold text-blue-300">
-                Stay Informed
-              </h4>
-
-              <p className="mt-2 text-sm text-slate-400">
-                Follow official emergency alerts and instructions
-                from local authorities.
-              </p>
-
-            </div>
-
-
-            <div>
-
-              <h4 className="font-semibold text-green-300">
-                Stay Safe
-              </h4>
-
-              <p className="mt-2 text-sm text-slate-400">
-                Move to a safe location and avoid dangerous
-                or flooded areas.
-              </p>
-
-            </div>
-
-
-            <div>
-
-              <h4 className="font-semibold text-orange-300">
-                Help Others
-              </h4>
-
-              <p className="mt-2 text-sm text-slate-400">
-                Help children, elderly people, and vulnerable
-                individuals when it is safe to do so.
-              </p>
-
-            </div>
-
-          </div>
-
         </section>
-
       </div>
 
-
-      {/* ======================================================
-          EMERGENCY REPORT MODAL
-      ====================================================== */}
-
+      {/* REPORT EMERGENCY MODAL */}
       {showReportModal && (
-
-        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/80 p-4 backdrop-blur-sm">
-
-          <div className="w-full max-w-2xl rounded-2xl border border-white/10 bg-[#0d1424] shadow-2xl">
-
-            {/* ------------------------------------------------
-                MODAL HEADER
-            ------------------------------------------------ */}
-
-            <div className="flex items-center justify-between border-b border-white/10 p-6">
-
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="w-full max-w-lg rounded-2xl border border-white/15 bg-[#0d1424] p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between border-b border-white/10 pb-4">
               <div>
-
-                <p className="text-sm font-medium text-red-400">
-                  EMERGENCY REPORT
-                </p>
-
-                <h2 className="mt-1 text-2xl font-bold">
-                  Report an Emergency
-                </h2>
-
+                <span className="text-[11px] font-bold text-red-400 uppercase tracking-wider">
+                  Emergency Situation Dispatch
+                </span>
+                <h3 className="text-xl font-bold text-white mt-0.5">Submit Incident Report</h3>
               </div>
-
               <button
-                onClick={closeReportModal}
-                disabled={submitting}
-                className="rounded-lg px-3 py-2 text-2xl text-slate-400 transition hover:bg-white/10 hover:text-white disabled:opacity-50"
+                onClick={() => setShowReportModal(false)}
+                aria-label="Close modal"
+                className="text-slate-400 hover:text-white text-2xl px-2"
               >
                 ×
               </button>
-
             </div>
 
-
-            {/* ------------------------------------------------
-                MODAL BODY
-            ------------------------------------------------ */}
-
-            <div className="space-y-6 p-6">
-
-              {/* Emergency Type */}
-
+            <form onSubmit={handleSubmitReport} className="space-y-4">
               <div>
-
-                <label className="mb-2 block text-sm font-medium">
-                  Emergency type
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  Hazard / Emergency Type
                 </label>
-
-                <select
-                  value={emergencyType}
-                  onChange={(e) =>
-                    setEmergencyType(e.target.value)
-                  }
-                  disabled={submitting}
-                  className="w-full rounded-xl border border-white/10 bg-[#1c293e] px-4 py-4 text-white outline-none transition focus:border-blue-500 disabled:opacity-50"
-                >
-
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                   {emergencyTypes.map((type) => (
-                    <option
+                    <button
                       key={type}
-                      value={type}
-                      className="bg-[#1c293e]"
+                      type="button"
+                      onClick={() => setEmergencyType(type)}
+                      className={`p-2 rounded-xl border text-xs font-semibold flex items-center gap-2 transition text-left ${
+                        emergencyType === type
+                          ? "border-red-500 bg-red-950/40 text-white"
+                          : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                      }`}
                     >
-                      {type}
-                    </option>
+                      <span className="text-base">{getTypeIcon(type)}</span>
+                      <span className="truncate">{type}</span>
+                    </button>
                   ))}
-
-                </select>
-
+                </div>
               </div>
 
-
-              {/* Description */}
-
               <div>
-
-                <label className="mb-2 block text-sm font-medium">
-                  Describe the emergency
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  Situation Description
                 </label>
-
                 <textarea
                   value={description}
-                  onChange={(e) =>
-                    setDescription(e.target.value)
-                  }
-                  disabled={submitting}
-                  rows={5}
-                  placeholder="Describe what happened, how many people are affected, and any other important information..."
-                  className="w-full resize-none rounded-xl border border-white/10 bg-[#1c293e] px-4 py-4 text-white outline-none placeholder:text-slate-500 focus:border-blue-500 disabled:opacity-50"
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Describe trapped victims, hazards, water levels, access routes..."
+                  rows={3}
+                  required
+                  className="w-full rounded-xl border border-white/10 bg-[#070b14] p-3 text-xs text-white placeholder:text-slate-500 outline-none focus:border-red-500 resize-none"
                 />
-
               </div>
-
-
-              {/* Photo */}
 
               <div>
-
-                <div className="flex h-36 cursor-not-allowed flex-col items-center justify-center rounded-xl border border-dashed border-white/20 bg-[#0e1729]">
-
-                  <div className="text-3xl">
-                    📷
-                  </div>
-
-                  <p className="mt-2 font-medium">
-                    Add photo
-                  </p>
-
-                  <p className="mt-1 text-sm text-slate-500">
-                    Photo upload will be connected later
-                  </p>
-
-                </div>
-
-              </div>
-
-
-              {/* Location */}
-
-              <div className="rounded-xl bg-[#14234d] p-5">
-
-                <div className="flex items-center justify-between gap-4">
-
-                  <div>
-
-                    <div className="flex items-center gap-2">
-
-                      <span className="text-xl">
-                        📍
-                      </span>
-
-                      <span className="font-semibold text-blue-200">
-                        Location
-                      </span>
-
-                    </div>
-
-                    <p className="mt-2 text-sm text-slate-400">
-                      {location
-                        ? `${location.lat.toFixed(5)}, ${location.lng.toFixed(5)}`
-                        : locationStatus}
-                    </p>
-
-                  </div>
-
-
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-semibold text-slate-300">
+                    Incident Coordinates (GPS)
+                  </label>
                   <button
+                    type="button"
                     onClick={detectLocation}
-                    disabled={submitting}
-                    className="rounded-lg bg-blue-600 px-5 py-3 font-semibold transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="text-[11px] text-sky-400 hover:text-sky-300 font-semibold"
                   >
-                    Detect
+                    ↻ Re-detect GPS
                   </button>
-
                 </div>
 
+                <div className="rounded-xl border border-white/10 bg-[#070b14] p-3 text-xs flex items-center justify-between">
+                  <span className="font-mono text-slate-300">
+                    {location
+                      ? `${location.latitude.toFixed(5)}, ${location.longitude.toFixed(5)}`
+                      : "No coordinates detected"}
+                  </span>
+                  <span className="text-[10px] text-slate-500">{locationStatus}</span>
+                </div>
               </div>
 
-
-              {/* Success */}
-
-              {successMessage && (
-
-                <div className="rounded-xl border border-green-500/40 bg-green-500/10 p-4 text-green-300">
-
-                  <div className="font-semibold">
-                    ✅ {successMessage}
-                  </div>
-
-                  <p className="mt-2 text-sm text-green-300/70">
-                    Your emergency report has been saved.
-                    Emergency response teams can now process
-                    the incident.
-                  </p>
-
-                </div>
-
-              )}
-
-
-              {/* Error */}
-
-              {errorMessage && (
-
-                <div className="rounded-xl border border-red-500/50 bg-red-500/10 p-4 text-red-300">
-
-                  <div className="font-semibold">
-                    ❌ {errorMessage}
-                  </div>
-
-                </div>
-
-              )}
-
-
-              {/* Submit */}
-
-              <button
-                onClick={handleSubmit}
-                disabled={submitting}
-                className="w-full rounded-xl bg-red-600 px-6 py-4 text-lg font-bold transition hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-red-900"
-              >
-
-                {submitting
-                  ? "Submitting Emergency Report..."
-                  : "Submit Emergency Report"}
-
-              </button>
-
-
-              <p className="text-center text-xs text-slate-500">
-                Your location will be shared with emergency
-                response services for coordination purposes.
-              </p>
-
-            </div>
-
+              <div className="pt-2 flex items-center justify-end gap-2 border-t border-white/10">
+                <button
+                  type="button"
+                  onClick={() => setShowReportModal(false)}
+                  className="rounded-xl bg-white/10 px-4 py-2.5 text-xs font-semibold text-slate-300 hover:bg-white/20 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting || !location}
+                  className="rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs px-5 py-2.5 transition shadow-lg shadow-red-950/50 disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {submitting && (
+                    <div className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin"></div>
+                  )}
+                  <span>{submitting ? "Broadcasting..." : "Confirm & Broadcast Emergency"}</span>
+                </button>
+              </div>
+            </form>
           </div>
-
         </div>
-
       )}
-
     </main>
   );
 }

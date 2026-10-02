@@ -37,7 +37,7 @@ export function getStatusConfig(status: string | null | undefined): StatusConfig
     case "verified":
       return {
         label: "Verified",
-        badgeClass: "bg-blue-500/15 text-blue-400 border-blue-500/30",
+        badgeClass: "bg-sky-500/15 text-sky-400 border-sky-500/30",
         icon: "🔍",
         description: "Verified by emergency dispatch",
       };
@@ -51,7 +51,7 @@ export function getStatusConfig(status: string | null | undefined): StatusConfig
     case "in_progress":
       return {
         label: "In Progress",
-        badgeClass: "bg-orange-500/15 text-orange-400 border-orange-500/30",
+        badgeClass: "bg-blue-500/15 text-blue-400 border-blue-500/30",
         icon: "⚡",
         description: "Active response underway",
       };

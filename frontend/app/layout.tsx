@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AIAC — Smart Disaster Response",
+  title: "RESCUEGRID — Smart Disaster Response & Emergency Coordination",
   description: "Smart Disaster Response & Emergency Coordination Platform",
 };
 

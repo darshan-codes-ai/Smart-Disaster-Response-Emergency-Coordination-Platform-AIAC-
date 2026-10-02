@@ -549,7 +549,7 @@ export default function DisasterMap({
         offset: 24,
         closeButton: true,
         closeOnClick: false,
-        className: "aiac-incident-popup",
+        className: "rescuegrid-incident-popup",
       }).setDOMContent(createPopupContent(incident));
 
       popup.on("close", () => {
