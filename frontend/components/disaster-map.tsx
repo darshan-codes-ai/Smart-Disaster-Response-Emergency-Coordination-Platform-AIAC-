@@ -14,6 +14,9 @@ export interface Incident {
   severity: number;
   status: string;
   priority_score?: number | null;
+  priority_tier?: string | null;
+  assigned_to?: string | null;
+  assigned_responder_name?: string | null;
   note?: string | null;
   created_at: string;
   updated_at?: string | null;
@@ -417,15 +420,30 @@ export default function DisasterMap({
       prioLabel.className = "block text-[10px] text-slate-400 uppercase font-medium";
       prioLabel.textContent = "Priority Score";
       const prioVal = document.createElement("span");
-      prioVal.className = "font-bold text-amber-400";
-      prioVal.textContent = String(
-        incident.priority_score ?? incident.severity * 20
-      );
+      const score = incident.priority_score ?? incident.severity * 20;
+      const tier = incident.priority_tier || (score >= 80 ? "CRITICAL" : score >= 60 ? "HIGH" : score >= 40 ? "MEDIUM" : "LOW");
+      prioVal.className = score >= 80 ? "font-bold text-red-400" : score >= 60 ? "font-bold text-orange-400" : score >= 40 ? "font-bold text-amber-400" : "font-bold text-slate-300";
+      prioVal.textContent = `${score} (${tier})`;
       priorityBox.appendChild(prioLabel);
       priorityBox.appendChild(prioVal);
       detailsGrid.appendChild(priorityBox);
 
       container.appendChild(detailsGrid);
+
+      // Assignment info if assigned
+      if (incident.assigned_to || incident.assigned_responder_name) {
+        const assignBox = document.createElement("div");
+        assignBox.className = "flex items-center justify-between text-[11px] bg-purple-500/10 border border-purple-500/20 px-2 py-1.5 rounded-lg";
+        const aLabel = document.createElement("span");
+        aLabel.className = "text-purple-300 font-medium";
+        aLabel.textContent = "Assigned Responder:";
+        const aVal = document.createElement("span");
+        aVal.className = "text-purple-200 font-semibold";
+        aVal.textContent = incident.assigned_responder_name || "Assigned Unit";
+        assignBox.appendChild(aLabel);
+        assignBox.appendChild(aVal);
+        container.appendChild(assignBox);
+      }
 
       // Footer: Coordinates, ID, and Date
       const footer = document.createElement("div");

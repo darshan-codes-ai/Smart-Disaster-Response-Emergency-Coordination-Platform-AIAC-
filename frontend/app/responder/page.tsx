@@ -8,7 +8,6 @@ import { useCurrentUser } from "../../lib/supabase/use-current-user";
 import Navbar from "../../components/navbar";
 import StatusBadge from "../../components/status-badge";
 import SeverityBadge from "../../components/severity-badge";
-import { getStatusConfig } from "../../lib/status-workflow";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -24,12 +23,29 @@ function getTypeIcon(type: string): string {
   return "⚠️";
 }
 
+function PriorityBadge({ score, tier }: { score?: number | null; tier?: string | null }) {
+  const val = score ?? 0;
+  const t = tier || (val >= 80 ? "CRITICAL" : val >= 60 ? "HIGH" : val >= 40 ? "MEDIUM" : "LOW");
+  let cls = "bg-slate-500/15 text-slate-300 border-slate-500/30";
+  if (t === "CRITICAL") cls = "bg-red-500/20 text-red-300 border-red-500/40 animate-pulse";
+  else if (t === "HIGH") cls = "bg-orange-500/20 text-orange-300 border-orange-500/40";
+  else if (t === "MEDIUM") cls = "bg-amber-500/20 text-amber-300 border-amber-500/40";
+  else if (t === "LOW") cls = "bg-sky-500/15 text-sky-300 border-sky-500/30";
+
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${cls}`}>
+      <span className="font-mono">{val}</span>
+      <span className="text-[9px] opacity-80">{t}</span>
+    </span>
+  );
+}
+
 export default function ResponderPage() {
-  const { role, isResponder, isCommandCenter, loading: userLoading } = useCurrentUser();
+  const { profile, role, isResponder, isCommandCenter, loading: userLoading } = useCurrentUser();
 
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"active" | "all" | "resolved">("active");
+  const [tab, setTab] = useState<"assigned_me" | "active" | "all" | "resolved">("assigned_me");
   const [searchQuery, setSearchQuery] = useState("");
 
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
@@ -83,7 +99,7 @@ export default function ResponderPage() {
 
   useEffect(() => {
     let ignore = false;
-    if (!userLoading && (isResponder || isCommandCenter)) {
+    if (!userLoading && (isResponder || isCommandCenter || role === "admin")) {
       Promise.resolve().then(() => {
         if (!ignore) {
           fetchIncidents();
@@ -93,7 +109,7 @@ export default function ResponderPage() {
     return () => {
       ignore = true;
     };
-  }, [userLoading, isResponder, isCommandCenter, fetchIncidents]);
+  }, [userLoading, isResponder, isCommandCenter, role, fetchIncidents]);
 
   // ------------------------------------------------------------
   // UPDATE INCIDENT (STATUS OR FIELD NOTE)
@@ -109,13 +125,13 @@ export default function ResponderPage() {
         throw new Error("Your login session has expired. Please log in again.");
       }
 
-      const payload: { status?: string; note?: string } = {};
-      if (newStatus !== undefined) payload.status = newStatus;
-      if (newNote !== undefined) payload.note = newNote;
+      const bodyPayload: { status?: string; note?: string } = {};
+      if (newStatus !== undefined) bodyPayload.status = newStatus;
+      if (newNote !== undefined) bodyPayload.note = newNote;
 
       let res = await requestWithToken(`${API_URL}/incidents/${incidentId}`, token, {
         method: "PATCH",
-        body: JSON.stringify(payload),
+        body: JSON.stringify(bodyPayload),
       });
 
       if (res.status === 401) {
@@ -123,7 +139,7 @@ export default function ResponderPage() {
         if (freshToken) {
           res = await requestWithToken(`${API_URL}/incidents/${incidentId}`, freshToken, {
             method: "PATCH",
-            body: JSON.stringify(payload),
+            body: JSON.stringify(bodyPayload),
           });
         }
       }
@@ -134,16 +150,21 @@ export default function ResponderPage() {
         throw new Error(data?.detail || "Failed to update incident");
       }
 
-      const updated: Incident = data.incident;
+      const updatedIncident: Incident = data.incident;
       setIncidents((prev) =>
-        prev.map((i) => (i.id === incidentId ? updated : i))
+        prev.map((inc) => (inc.id === incidentId ? updatedIncident : inc))
       );
 
-      setSuccessMessage(
-        newStatus
-          ? `Status updated to "${getStatusConfig(updated.status).label}"`
-          : "Field note recorded successfully."
-      );
+      let msg = `Incident updated successfully.`;
+      if (newStatus === "in_progress") {
+        msg = `Response underway. Status changed to "In Progress".`;
+      } else if (newStatus === "resolved") {
+        msg = `Emergency cleared. Status marked as "Resolved".`;
+      } else if (newNote !== undefined) {
+        msg = `Operational field note logged.`;
+      }
+
+      setSuccessMessage(msg);
       setActiveNoteIncidentId(null);
       setNoteText("");
 
@@ -157,95 +178,109 @@ export default function ResponderPage() {
   };
 
   // ------------------------------------------------------------
-  // FILTERING & QUEUE
+  // COMPUTED COUNTS & FILTERING
   // ------------------------------------------------------------
+  const myAssignedCount = useMemo(() => {
+    if (!profile?.id) return 0;
+    return incidents.filter(
+      (inc) =>
+        inc.assigned_to === profile.id &&
+        inc.status !== "resolved" &&
+        inc.status !== "cancelled"
+    ).length;
+  }, [incidents, profile]);
+
+  const activeCount = useMemo(() => {
+    return incidents.filter(
+      (inc) => inc.status !== "resolved" && inc.status !== "cancelled"
+    ).length;
+  }, [incidents]);
+
   const filteredIncidents = useMemo(() => {
     return incidents.filter((inc) => {
-      const s = (inc.status || "reported").toLowerCase();
-
-      if (tab === "active") {
-        if (s === "resolved" || s === "cancelled") return false;
+      // Tab filter
+      const st = (inc.status || "reported").toLowerCase();
+      if (tab === "assigned_me") {
+        if (!profile?.id || inc.assigned_to !== profile.id || st === "resolved" || st === "cancelled") {
+          return false;
+        }
+      } else if (tab === "active") {
+        if (st === "resolved" || st === "cancelled") return false;
       } else if (tab === "resolved") {
-        if (s !== "resolved") return false;
+        if (st !== "resolved") return false;
       }
 
+      // Search query
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
-        const matchType = inc.type?.toLowerCase().includes(q);
-        const matchDesc = inc.description?.toLowerCase().includes(q);
-        const matchNote = inc.note?.toLowerCase().includes(q);
-        const matchId = inc.id?.toLowerCase().includes(q);
-        if (!matchType && !matchDesc && !matchNote && !matchId) return false;
+        const matchesType = (inc.type || "").toLowerCase().includes(q);
+        const matchesDesc = (inc.description || "").toLowerCase().includes(q);
+        const matchesNote = (inc.note || "").toLowerCase().includes(q);
+        const matchesId = (inc.id || "").toLowerCase().includes(q);
+        const matchesResp = (inc.assigned_responder_name || "").toLowerCase().includes(q);
+        if (!matchesType && !matchesDesc && !matchesNote && !matchesId && !matchesResp) {
+          return false;
+        }
       }
 
       return true;
     });
-  }, [incidents, tab, searchQuery]);
+  }, [incidents, tab, profile, searchQuery]);
 
-  const activeCount = useMemo(() => {
-    return incidents.filter(
-      (i) => !["resolved", "cancelled"].includes((i.status || "reported").toLowerCase())
-    ).length;
-  }, [incidents]);
-
+  // Lead assignment hero card: pick user's active assignment, or highest priority active incident
   const leadAssignment = useMemo(() => {
-    // Look for in_progress first, then assigned, then highest severity
-    const activeOnes = incidents.filter(
-      (i) => !["resolved", "cancelled"].includes((i.status || "reported").toLowerCase())
+    if (profile?.id) {
+      const myTask = incidents.find(
+        (inc) =>
+          inc.assigned_to === profile.id &&
+          inc.status !== "resolved" &&
+          inc.status !== "cancelled"
+      );
+      if (myTask) return myTask;
+    }
+
+    return (
+      incidents.find((inc) => inc.status === "in_progress") ||
+      incidents.find((inc) => (inc.severity >= 4 || (inc.priority_score ?? 0) >= 80) && inc.status !== "resolved" && inc.status !== "cancelled") ||
+      null
     );
-    if (activeOnes.length === 0) return null;
-
-    const inProg = activeOnes.find((i) => (i.status || "").toLowerCase() === "in_progress");
-    if (inProg) return inProg;
-
-    const assigned = activeOnes.find((i) => (i.status || "").toLowerCase() === "assigned");
-    if (assigned) return assigned;
-
-    return activeOnes.sort((a, b) => (b.severity || 1) - (a.severity || 1))[0];
-  }, [incidents]);
+  }, [incidents, profile]);
 
   // ------------------------------------------------------------
-  // ROLE GUARD & ACCESS RESTRICTED SCREEN
+  // ACCESS GUARD
   // ------------------------------------------------------------
   if (userLoading) {
     return (
       <main className="min-h-screen bg-[#070b14] flex items-center justify-center text-white">
         <div className="flex flex-col items-center gap-3">
           <div className="h-8 w-8 rounded-full border-2 border-orange-500 border-t-transparent animate-spin"></div>
-          <p className="text-slate-400 text-sm font-medium">Verifying Responder credentials...</p>
+          <p className="text-slate-400 text-xs font-medium">Verifying Responder credentials...</p>
         </div>
       </main>
     );
   }
 
-  if (!isResponder && !isCommandCenter) {
+  if (!isResponder && !isCommandCenter && role !== "admin") {
     return (
       <main className="min-h-screen bg-[#070b14] text-white flex flex-col items-center justify-center p-6">
-        <div className="max-w-md w-full rounded-2xl border border-orange-500/30 bg-[#0e1424] p-8 text-center shadow-2xl space-y-5">
-          <div className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-orange-500/10 border border-orange-500/30 text-2xl text-orange-400">
-            🚑
+        <div className="max-w-md w-full rounded-2xl border border-orange-500/30 bg-orange-950/20 p-8 text-center shadow-2xl backdrop-blur">
+          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-orange-500/10 border border-orange-500/30 text-2xl mx-auto mb-4">
+            🚒
           </div>
-          <div>
-            <h1 className="text-lg font-extrabold tracking-wider text-white">
-              RESCUE<span className="text-sky-400">GRID</span>
-            </h1>
-            <h2 className="text-xl font-bold text-slate-100 mt-2">Responder Console Restricted</h2>
-            <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-              The Responder Console is restricted to field rescue teams, medical personnel, and emergency first responders.
-            </p>
+          <h2 className="text-xl font-bold text-orange-300 mb-2">Access Restricted</h2>
+          <p className="text-xs text-slate-300 mb-4 leading-relaxed">
+            The RescueGrid Field Responder Console is restricted to verified emergency personnel and command dispatchers.
+          </p>
+          <div className="rounded-xl bg-black/40 border border-white/10 p-3 mb-6 text-xs text-slate-400">
+            <span>Your current role: </span>
+            <strong className="text-white uppercase font-mono">{role || "citizen"}</strong>
           </div>
-
-          <div className="rounded-xl bg-black/40 border border-white/10 p-3 text-xs text-slate-400 flex items-center justify-between">
-            <span>Your Current Role:</span>
-            <span className="font-mono font-bold text-orange-300 uppercase">{role}</span>
-          </div>
-
-          <div className="flex flex-col gap-2 pt-2">
+          <div className="flex flex-col gap-2">
             <Link
               href="/"
-              className="w-full rounded-xl bg-orange-600 hover:bg-orange-500 px-4 py-2.5 font-semibold text-xs text-white transition shadow-md shadow-orange-900/40"
+              className="w-full rounded-xl bg-sky-600 px-4 py-2.5 font-bold text-xs hover:bg-sky-500 transition shadow-lg shadow-sky-950/50"
             >
-              Return to Citizen Dashboard
+              Go to Citizen Dashboard
             </Link>
             <Link
               href="/incidents"
@@ -302,18 +337,28 @@ export default function ResponderPage() {
           </div>
         )}
 
-        {/* DOMINANT "CURRENT RESPONSE ASSIGNMENT" HERO CARD */}
+        {/* DOMINANT LEAD ASSIGNMENT HERO CARD */}
         {leadAssignment && (
           <section className="rounded-2xl border border-orange-500/30 bg-gradient-to-r from-orange-950/25 via-[#0e1424] to-[#0e1424] p-6 shadow-2xl relative overflow-hidden">
             <div className="absolute top-0 right-0 transform translate-x-8 -translate-y-8 w-44 h-44 bg-orange-600/10 rounded-full blur-3xl pointer-events-none"></div>
 
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 relative z-10">
               <div className="space-y-3 max-w-2xl">
-                <div className="flex items-center gap-2">
-                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-orange-500/20 text-orange-300 border border-orange-500/40">
-                    <span className="h-1.5 w-1.5 rounded-full bg-orange-400 animate-ping"></span>
-                    Priority Response Deployment
-                  </span>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {leadAssignment.assigned_to === profile?.id ? (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-purple-500/20 text-purple-300 border border-purple-500/40">
+                      <span className="h-1.5 w-1.5 rounded-full bg-purple-400 animate-ping"></span>
+                      Assigned to You
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-orange-500/20 text-orange-300 border border-orange-500/40">
+                      <span className="h-1.5 w-1.5 rounded-full bg-orange-400 animate-ping"></span>
+                      Priority Field Deployment
+                    </span>
+                  )}
+
+                  <PriorityBadge score={leadAssignment.priority_score} tier={leadAssignment.priority_tier} />
+
                   <span className="text-xs text-slate-500 font-mono">
                     ID: {leadAssignment.id.slice(0, 8)}...
                   </span>
@@ -393,6 +438,20 @@ export default function ResponderPage() {
         <section className="rounded-xl border border-white/10 bg-[#0e1424] p-3.5 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 shadow-md">
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
             <button
+              onClick={() => setTab("assigned_me")}
+              className={`rounded-lg px-3.5 py-1.5 text-xs font-bold transition flex items-center gap-2 ${
+                tab === "assigned_me"
+                  ? "bg-purple-600 text-white shadow-md shadow-purple-900/40"
+                  : "bg-white/5 text-slate-400 hover:bg-white/10 hover:text-white"
+              }`}
+            >
+              <span>👤 Assigned to Me</span>
+              <span className="rounded-full bg-black/40 px-1.5 py-0.5 text-[10px] font-mono">
+                {myAssignedCount}
+              </span>
+            </button>
+
+            <button
               onClick={() => setTab("active")}
               className={`rounded-lg px-3.5 py-1.5 text-xs font-bold transition flex items-center gap-2 ${
                 tab === "active"
@@ -400,10 +459,7 @@ export default function ResponderPage() {
                   : "bg-white/5 text-slate-400 hover:bg-white/10 hover:text-white"
               }`}
             >
-              <span>Active Response Queue</span>
-              <span className="rounded-full bg-black/40 px-1.5 py-0.5 text-[10px] font-mono">
-                {activeCount}
-              </span>
+              <span>All Active ({activeCount})</span>
             </button>
 
             <button
@@ -448,25 +504,20 @@ export default function ResponderPage() {
         {/* INCIDENT CARDS GRID */}
         {loading ? (
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {[1, 2, 3, 4, 5, 6].map((i) => (
-              <div key={i} className="animate-pulse rounded-2xl border border-white/5 bg-[#0e1424] p-5 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="h-4 w-32 bg-white/10 rounded"></div>
-                  <div className="h-4 w-16 bg-white/10 rounded-full"></div>
-                </div>
-                <div className="h-10 bg-white/5 rounded-xl"></div>
-                <div className="h-8 bg-white/5 rounded-xl"></div>
-              </div>
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="h-64 rounded-2xl bg-white/[0.02] border border-white/5 animate-pulse" />
             ))}
           </div>
         ) : filteredIncidents.length === 0 ? (
-          <div className="rounded-2xl border border-white/10 bg-[#0e1424] p-16 flex flex-col items-center justify-center text-center text-slate-500">
-            <span className="text-4xl mb-3">🛡️</span>
-            <p className="text-base font-semibold text-slate-200">No Incidents in this Queue</p>
-            <p className="text-xs text-slate-500 mt-1 max-w-sm leading-relaxed">
-              {tab === "active"
-                ? "All emergencies have been handled. No active deployments pending."
-                : "No matching records found for current criteria."}
+          <div className="flex flex-col items-center justify-center py-20 text-center rounded-2xl border border-white/10 bg-[#0e1424] p-8 shadow-sm">
+            <span className="text-4xl mb-3">📋</span>
+            <h3 className="text-sm font-bold text-white">
+              {tab === "assigned_me" ? "No Incidents Assigned to You" : "No Emergency Incidents"}
+            </h3>
+            <p className="text-xs text-slate-400 mt-1 max-w-sm">
+              {tab === "assigned_me"
+                ? "You currently have no dispatched incidents. Check 'All Active' for unassigned queue items."
+                : "No incidents match your current queue filter."}
             </p>
           </div>
         ) : (
@@ -475,14 +526,19 @@ export default function ResponderPage() {
               const isUpdating = actionLoadingId === inc.id;
               const isAddingNote = activeNoteIncidentId === inc.id;
               const currentStatus = (inc.status || "reported").toLowerCase();
+              const isAssignedToMe = profile?.id && inc.assigned_to === profile.id;
 
               return (
                 <div
                   key={inc.id}
-                  className="rounded-2xl border border-white/10 bg-[#0e1424] p-5 flex flex-col justify-between hover:border-white/20 transition shadow-lg space-y-4"
+                  className={`rounded-2xl border ${
+                    isAssignedToMe
+                      ? "border-purple-500/40 bg-purple-950/10 shadow-lg shadow-purple-950/30"
+                      : "border-white/10 bg-[#0e1424]"
+                  } p-4 flex flex-col justify-between gap-4 shadow-sm hover:border-white/20 transition`}
                 >
                   <div className="space-y-3">
-                    {/* Header: Type, Severity, Status */}
+                    {/* Header: Type, ID, Badges */}
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex items-center gap-2">
                         <span className="text-2xl">{getTypeIcon(inc.type)}</span>
@@ -496,21 +552,36 @@ export default function ResponderPage() {
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-1.5">
-                        <SeverityBadge severity={inc.severity} size="sm" />
+                      <div className="flex flex-col items-end gap-1">
+                        <PriorityBadge score={inc.priority_score} tier={inc.priority_tier} />
                         <StatusBadge status={inc.status} size="sm" showIcon={false} />
                       </div>
                     </div>
 
-                    {/* Coordinates & Timestamp */}
+                    {/* Assignment Pill */}
+                    <div className="flex items-center justify-between text-[11px] bg-white/[0.02] px-2.5 py-1.5 rounded-xl border border-white/5">
+                      <span className="text-slate-400 text-[10px] font-bold uppercase tracking-wider">Dispatch State</span>
+                      {isAssignedToMe ? (
+                        <span className="text-purple-300 font-bold flex items-center gap-1">
+                          <span>👤</span>
+                          <span>Assigned to You</span>
+                        </span>
+                      ) : inc.assigned_to ? (
+                        <span className="text-slate-300 flex items-center gap-1">
+                          <span>👤</span>
+                          <span>{inc.assigned_responder_name || "Assigned Unit"}</span>
+                        </span>
+                      ) : (
+                        <span className="text-amber-400/90 font-medium">Unassigned Queue</span>
+                      )}
+                    </div>
+
+                    {/* Severity & Coordinates */}
                     <div className="flex items-center justify-between border-y border-white/5 py-2 text-xs">
+                      <SeverityBadge severity={inc.severity} size="sm" />
                       <span className="text-[11px] font-mono text-slate-400 flex items-center gap-1">
                         <span>📍</span>
-                        <span>{inc.latitude.toFixed(4)}, {inc.longitude.toFixed(4)}</span>
-                      </span>
-
-                      <span className="text-[10px] text-slate-500">
-                        {inc.created_at ? new Date(inc.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}
+                        <span>{inc.latitude.toFixed(3)}, {inc.longitude.toFixed(3)}</span>
                       </span>
                     </div>
 
@@ -561,7 +632,7 @@ export default function ResponderPage() {
                     )}
                   </div>
 
-                  {/* Operational Action Controls */}
+                  {/* Operational Action Controls (Preserving strict responder permissions: in_progress, resolved) */}
                   <div className="pt-3 border-t border-white/10 space-y-2">
                     <div className="flex items-center gap-2">
                       {currentStatus !== "in_progress" && currentStatus !== "resolved" && (
@@ -590,7 +661,7 @@ export default function ResponderPage() {
                             setActiveNoteIncidentId(inc.id);
                             setNoteText(inc.note || "");
                           }}
-                          className="rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-slate-300 font-semibold py-2 px-3 text-xs transition"
+                          className="rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-slate-300 px-3 py-2 text-xs font-semibold transition"
                         >
                           {inc.note ? "Edit Note" : "+ Note"}
                         </button>
@@ -606,4 +677,3 @@ export default function ResponderPage() {
     </main>
   );
 }
-
