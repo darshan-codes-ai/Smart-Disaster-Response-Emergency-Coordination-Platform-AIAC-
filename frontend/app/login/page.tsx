@@ -49,7 +49,28 @@ export default function LoginPage() {
         router.refresh();
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Authentication failed.");
+      const authError = err as { message?: string; code?: string; status?: number };
+      const rawMessage = authError?.message ?? "";
+      const normalized = rawMessage.toLowerCase();
+
+      if (
+        authError?.code === "over_email_send_rate_limit" ||
+        normalized.includes("email rate limit exceeded") ||
+        normalized.includes("too many emails")
+      ) {
+        setError(
+          "Supabase email limit reached. For the demo, use an existing RescueGrid account or create/confirm the user directly in Supabase Auth. The default email service allows only a small number of emails per hour."
+        );
+      } else if (
+        authError?.code === "over_request_rate_limit" ||
+        normalized.includes("too many requests")
+      ) {
+        setError(
+          "Too many authentication attempts. Please wait a few minutes and try again."
+        );
+      } else {
+        setError(rawMessage || "Authentication failed.");
+      }
     } finally {
       setLoading(false);
     }
