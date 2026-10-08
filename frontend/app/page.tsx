@@ -3,7 +3,7 @@
 import { FormEvent, useCallback, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { createClient } from "../lib/supabase/client";
+import { getAccessToken, requestWithToken } from "../lib/supabase/access-token";
 import { useCurrentUser } from "../lib/supabase/use-current-user";
 import type { Incident } from "../components/disaster-map";
 import Navbar from "../components/navbar";
@@ -110,45 +110,82 @@ export default function Home() {
     setErrorMessage(null);
 
     try {
-      const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
+      // Submit through FastAPI so authentication, ownership, priority scoring,
+      // and database writes all use the same backend workflow.
+      let accessToken = await getAccessToken();
 
-      const newRecord = {
+      if (!accessToken) {
+        throw new Error("Your login session has expired. Please log in again.");
+      }
+
+      const payload = {
         type: emergencyType,
         description: description.trim() || `${emergencyType} reported by citizen`,
-        latitude: location.latitude,
-        longitude: location.longitude,
-        severity: emergencyType === "Medical Emergency" || emergencyType === "Building Collapse" ? 4 : 3,
-        status: "reported",
-        user_id: user?.id || null,
+        location: {
+          lat: location.latitude,
+          lng: location.longitude,
+        },
+        severity:
+          emergencyType === "Medical Emergency" ||
+          emergencyType === "Building Collapse"
+            ? 4
+            : 3,
       };
 
-      const { data, error } = await supabase
-        .from("incidents")
-        .insert([newRecord])
-        .select()
-        .single();
+      const submitIncident = (token: string) =>
+        requestWithToken(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/incidents`, token, {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
 
-      if (error) throw error;
+      let response = await submitIncident(accessToken);
+
+      if (response.status === 401) {
+        accessToken = await getAccessToken(true);
+
+        if (!accessToken) {
+          throw new Error("Your login session has expired. Please log in again.");
+        }
+
+        response = await submitIncident(accessToken);
+      }
+
+      if (!response.ok) {
+        let detail = `Failed to record incident (HTTP ${response.status})`;
+        try {
+          const errorData = await response.json();
+          if (errorData?.detail) detail = errorData.detail;
+        } catch {
+          // Keep the HTTP fallback message.
+        }
+        throw new Error(detail);
+      }
+
+      const result = await response.json();
+      const createdIncident = result?.incident;
 
       setShowReportModal(false);
       setDescription("");
       setSuccessMessage("Emergency incident registered on RescueGrid. Dispatch teams alerted.");
       setMapRefreshTrigger((prev) => prev + 1);
 
-      if (data) {
-        setSelectedIncidentId(data.id);
+      if (createdIncident?.id) {
+        setSelectedIncidentId(createdIncident.id);
       }
 
       setTimeout(() => setSuccessMessage(null), 5000);
     } catch (err) {
-      console.error("Incident reporting error:", err);
-      setErrorMessage(err instanceof Error ? err.message : "Failed to record incident");
+      console.error(
+        "Incident reporting error:",
+        err instanceof Error ? err.message : err
+      );
+      setErrorMessage(
+        err instanceof Error ? err.message : "Failed to record incident"
+      );
     } finally {
       setSubmitting(false);
     }
   };
-
   const stats = useMemo(() => {
     const total = incidentsList.length;
     let active = 0;
