@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import * as maplibregl from "maplibre-gl";
-import { createClient } from "../lib/supabase/client";
+import { getAccessToken } from "../lib/supabase/access-token";
 
 export interface Incident {
   id: string;
@@ -144,11 +144,6 @@ export default function DisasterMap({
   const fetchIncidents = useCallback(
     async () => {
       try {
-        const supabase = createClient();
-        const {
-          data: { session },
-        } = await supabase.auth.getSession();
-
         const requestIncidents = async (accessToken: string) => {
           return fetch(`${API_URL}/incidents`, {
             method: "GET",
@@ -159,34 +154,25 @@ export default function DisasterMap({
           });
         };
 
-        // Always use a current session. If the access token is stale,
-        // refresh the Supabase session and retry the request once.
-        let accessToken = session?.access_token;
+        // Use the centralized token helper so every request gets the
+        // freshest Supabase access token and refreshes safely when needed.
+        let accessToken = await getAccessToken();
 
         if (!accessToken) {
-          const { data: refreshed, error: refreshError } =
-            await supabase.auth.refreshSession();
-
-          if (refreshError || !refreshed.session?.access_token) {
-            throw new Error(
-              "Your login session has expired. Please log in again."
-            );
-          }
-
-          accessToken = refreshed.session.access_token;
+          throw new Error("Your login session has expired. Please log in again.");
         }
 
         let response = await requestIncidents(accessToken);
 
+        // Backend rejected the token: force one coordinated refresh and retry.
         if (response.status === 401) {
-          const { data: refreshed, error: refreshError } =
-            await supabase.auth.refreshSession();
+          accessToken = await getAccessToken(true);
 
-          if (!refreshError && refreshed.session?.access_token) {
-            response = await requestIncidents(
-              refreshed.session.access_token
-            );
+          if (!accessToken) {
+            throw new Error("Your login session has expired. Please log in again.");
           }
+
+          response = await requestIncidents(accessToken);
         }
 
         if (!response.ok) {
@@ -208,6 +194,7 @@ export default function DisasterMap({
         if (isMountedRef.current) {
           setIncidents(fetchedIncidents);
           onIncidentsLoaded?.(fetchedIncidents);
+          setErrorMessage(null);
         }
       } catch (err) {
         console.error("DisasterMap fetch error:", err);
@@ -227,7 +214,6 @@ export default function DisasterMap({
     },
     [onIncidentsLoaded]
   );
-
   // ------------------------------------------------------------
   // INITIALIZE MAP
   // ------------------------------------------------------------
