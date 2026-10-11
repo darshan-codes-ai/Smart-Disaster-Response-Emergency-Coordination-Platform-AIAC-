@@ -1222,6 +1222,423 @@ class IncidentApiSecurityTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["incident"]["note"], "Admin operational audit note")
 
+    # ============================================================
+    # 13. Phase 5.1: Persistent Incident Audit History Tests
+    # ============================================================
+    @patch("backend.main.supabase")
+    def test_audit_event_logged_on_incident_create(self, mock_supabase):
+        """Creating an incident records an incident_created audit event."""
+        citizen = {"id": "cit-001", "role": "citizen", "full_name": "Alice Reporter", "email": "alice@test.com"}
+        app.dependency_overrides[get_current_user] = lambda: citizen
+
+        event_inserts = []
+
+        def table_side_effect(table_name):
+            mock = MagicMock()
+            if table_name == "incidents":
+                mock.insert.return_value.execute.return_value.data = [{
+                    "id": "inc-new-1",
+                    "user_id": "cit-001",
+                    "type": "Flood",
+                    "description": "Flash flooding on Main St",
+                    "latitude": 37.77,
+                    "longitude": -122.41,
+                    "severity": 3,
+                    "status": "reported",
+                    "priority_score": 55,
+                    "created_at": "2026-10-11T12:00:00Z",
+                    "updated_at": "2026-10-11T12:00:00Z",
+                }]
+            elif table_name == "incident_events":
+                def record_insert(record):
+                    event_inserts.append(record)
+                    m = MagicMock()
+                    m.execute.return_value.data = [record]
+                    return m
+                mock.insert.side_effect = record_insert
+            return mock
+
+        mock_supabase.table.side_effect = table_side_effect
+
+        payload = {
+            "type": "Flood",
+            "description": "Flash flooding on Main St",
+            "location": {"lat": 37.77, "lng": -122.41},
+            "severity": 3,
+        }
+        resp = self.client.post("/incidents", json=payload)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(event_inserts), 1)
+        event = event_inserts[0]
+        self.assertEqual(event["event_type"], "incident_created")
+        self.assertEqual(event["actor_id"], "cit-001")
+        self.assertEqual(event["metadata"]["action_label"], "Incident Reported")
+        self.assertEqual(event["metadata"]["actor_name"], "Alice Reporter")
+        self.assertEqual(event["metadata"]["actor_role"], "citizen")
+
+    @patch("backend.main.supabase")
+    def test_audit_event_logged_on_status_change(self, mock_supabase):
+        """Updating status records a status_changed audit event."""
+        coord = {"id": "coord-1", "role": "command_center", "full_name": "Dispatcher Dave", "email": "dave@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: coord
+
+        event_inserts = []
+
+        def table_side_effect(table_name):
+            mock = MagicMock()
+            if table_name == "incidents":
+                mock.select.return_value.eq.return_value.execute.return_value.data = [{
+                    "id": "inc-10",
+                    "status": "reported",
+                    "severity": 4,
+                    "type": "Fire",
+                    "created_at": "2026-10-11T12:00:00Z",
+                }]
+                mock.update.return_value.eq.return_value.execute.return_value.data = [{
+                    "id": "inc-10",
+                    "status": "verified",
+                    "severity": 4,
+                    "type": "Fire",
+                }]
+            elif table_name == "incident_events":
+                def record_insert(record):
+                    event_inserts.append(record)
+                    m = MagicMock()
+                    m.execute.return_value.data = [record]
+                    return m
+                mock.insert.side_effect = record_insert
+            return mock
+
+        mock_supabase.table.side_effect = table_side_effect
+
+        resp = self.client.patch("/incidents/inc-10", json={"status": "verified"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(event_inserts), 1)
+        event = event_inserts[0]
+        self.assertEqual(event["event_type"], "status_changed")
+        self.assertEqual(event["actor_id"], "coord-1")
+        self.assertEqual(event["previous_state"]["status"], "reported")
+        self.assertEqual(event["new_state"]["status"], "verified")
+
+    @patch("backend.main.supabase")
+    def test_audit_event_logged_on_responder_assignment_and_unassignment(self, mock_supabase):
+        """Assigning and unassigning responders records corresponding audit events."""
+        admin = {"id": "admin-1", "role": "admin", "full_name": "Chief Admin", "email": "admin@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: admin
+
+        resp_uuid = "00000000-0000-0000-0000-000000000002"
+        event_inserts = []
+
+        def table_side_effect(table_name):
+            mock = MagicMock()
+            if table_name == "incidents":
+                mock.select.return_value.eq.return_value.execute.return_value.data = [{
+                    "id": "inc-20",
+                    "status": "verified",
+                    "assigned_to": None,
+                    "severity": 3,
+                    "type": "Flood",
+                }]
+                mock.update.return_value.eq.return_value.execute.return_value.data = [{
+                    "id": "inc-20",
+                    "status": "assigned",
+                    "assigned_to": resp_uuid,
+                    "severity": 3,
+                    "type": "Flood",
+                }]
+            elif table_name == "profiles":
+                mock.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = [{
+                    "id": resp_uuid, "role": "responder", "full_name": "Medic Sam"
+                }]
+            elif table_name == "incident_events":
+                def record_insert(record):
+                    event_inserts.append(record)
+                    m = MagicMock()
+                    m.execute.return_value.data = [record]
+                    return m
+                mock.insert.side_effect = record_insert
+            return mock
+
+        mock_supabase.table.side_effect = table_side_effect
+
+        # 1. Assignment
+        resp = self.client.patch("/incidents/inc-20", json={"assigned_to": resp_uuid})
+        self.assertEqual(resp.status_code, 200)
+        event_types = [e["event_type"] for e in event_inserts]
+        self.assertIn("responder_assigned", event_types)
+        assign_event = next(e for e in event_inserts if e["event_type"] == "responder_assigned")
+        self.assertEqual(assign_event["actor_id"], "admin-1")
+        self.assertEqual(assign_event["new_state"]["assigned_to"], resp_uuid)
+
+        # 2. Unassignment
+        event_inserts.clear()
+
+        def table_unassign_effect(table_name):
+            mock = MagicMock()
+            if table_name == "incidents":
+                mock.select.return_value.eq.return_value.execute.return_value.data = [{
+                    "id": "inc-20",
+                    "status": "assigned",
+                    "assigned_to": resp_uuid,
+                    "severity": 3,
+                    "type": "Flood",
+                }]
+                mock.update.return_value.eq.return_value.execute.return_value.data = [{
+                    "id": "inc-20",
+                    "status": "verified",
+                    "assigned_to": None,
+                    "severity": 3,
+                    "type": "Flood",
+                }]
+            elif table_name == "incident_events":
+                def record_insert(record):
+                    event_inserts.append(record)
+                    m = MagicMock()
+                    m.execute.return_value.data = [record]
+                    return m
+                mock.insert.side_effect = record_insert
+            return mock
+
+        mock_supabase.table.side_effect = table_unassign_effect
+
+        resp2 = self.client.patch("/incidents/inc-20", json={"assigned_to": None})
+        self.assertEqual(resp2.status_code, 200)
+        unassign_types = [e["event_type"] for e in event_inserts]
+        self.assertIn("responder_unassigned", unassign_types)
+        unassign_event = next(e for e in event_inserts if e["event_type"] == "responder_unassigned")
+        self.assertIsNone(unassign_event["new_state"]["assigned_to"])
+
+    @patch("backend.main.supabase")
+    def test_audit_event_logged_on_note_change(self, mock_supabase):
+        """Updating note records a note_added or note_updated audit event."""
+        resp_user = {"id": "resp-10", "role": "responder", "full_name": "Officer Bob", "email": "bob@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: resp_user
+
+        event_inserts = []
+
+        def table_side_effect(table_name):
+            mock = MagicMock()
+            if table_name == "incidents":
+                mock.select.return_value.eq.return_value.execute.return_value.data = [{
+                    "id": "inc-30",
+                    "status": "in_progress",
+                    "assigned_to": "resp-10",
+                    "note": None,
+                    "severity": 3,
+                    "type": "Medical Emergency",
+                }]
+                mock.update.return_value.eq.return_value.execute.return_value.data = [{
+                    "id": "inc-30",
+                    "status": "in_progress",
+                    "assigned_to": "resp-10",
+                    "note": "Patient stabilized at scene",
+                    "severity": 3,
+                    "type": "Medical Emergency",
+                }]
+            elif table_name == "incident_events":
+                def record_insert(record):
+                    event_inserts.append(record)
+                    m = MagicMock()
+                    m.execute.return_value.data = [record]
+                    return m
+                mock.insert.side_effect = record_insert
+            return mock
+
+        mock_supabase.table.side_effect = table_side_effect
+
+        resp = self.client.patch("/incidents/inc-30", json={"note": "Patient stabilized at scene"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(event_inserts), 1)
+        self.assertEqual(event_inserts[0]["event_type"], "note_added")
+        self.assertEqual(event_inserts[0]["new_state"]["note"], "Patient stabilized at scene")
+        self.assertEqual(event_inserts[0]["actor_id"], "resp-10")
+
+    @patch("backend.main.supabase")
+    def test_no_audit_event_on_failed_mutation(self, mock_supabase):
+        """Failed mutations do not record audit events."""
+        coord = {"id": "coord-1", "role": "command_center", "email": "coord@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: coord
+
+        event_inserts = []
+        mock_events = MagicMock()
+        mock_events.insert.side_effect = lambda rec: event_inserts.append(rec)
+        mock_supabase.table.return_value = mock_events
+
+        # 1. Invalid status
+        resp = self.client.patch("/incidents/inc-99", json={"status": "invalid_status"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(len(event_inserts), 0)
+
+        # 2. Empty payload
+        resp = self.client.patch("/incidents/inc-99", json={})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(len(event_inserts), 0)
+
+    @patch("backend.main.supabase")
+    def test_no_audit_event_on_unauthorized_mutation(self, mock_supabase):
+        """Unauthorized updates return 403 and record no audit events."""
+        citizen = {"id": "cit-1", "role": "citizen", "email": "cit1@test.com"}
+        app.dependency_overrides[get_current_user] = lambda: citizen
+
+        event_inserts = []
+
+        def table_side_effect(table_name):
+            mock = MagicMock()
+            if table_name == "incidents":
+                mock.select.return_value.eq.return_value.execute.return_value.data = [{
+                    "id": "inc-other",
+                    "user_id": "different-citizen-id",
+                    "status": "reported",
+                }]
+            elif table_name == "incident_events":
+                mock.insert.side_effect = lambda rec: event_inserts.append(rec)
+            return mock
+
+        mock_supabase.table.side_effect = table_side_effect
+
+        resp = self.client.patch("/incidents/inc-other", json={"status": "cancelled"})
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(len(event_inserts), 0)
+
+    def test_get_incident_events_unauthenticated_rejected(self):
+        """GET /incidents/{id}/events rejects unauthenticated requests with 401."""
+        resp = self.client.get("/incidents/inc-1/events")
+        self.assertEqual(resp.status_code, 401)
+
+    @patch("backend.main.supabase")
+    def test_get_incident_events_nonexistent_incident(self, mock_supabase):
+        """GET /incidents/{id}/events returns 404 if incident does not exist."""
+        admin = {"id": "admin-1", "role": "admin", "email": "admin@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: admin
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = []
+        mock_supabase.table.return_value = mock_table
+
+        resp = self.client.get("/incidents/nonexistent-id/events")
+        self.assertEqual(resp.status_code, 404)
+        self.assertIn("Incident not found", resp.json()["detail"])
+
+    @patch("backend.main.supabase")
+    def test_get_incident_events_citizen_own_incident(self, mock_supabase):
+        """Citizen can retrieve audit events for their own incident."""
+        citizen = {"id": "cit-owner", "role": "citizen", "email": "owner@test.com"}
+        app.dependency_overrides[get_current_user] = lambda: citizen
+
+        mock_events = [
+            {
+                "id": "ev-1",
+                "incident_id": "inc-own",
+                "actor_id": "cit-owner",
+                "event_type": "incident_created",
+                "metadata": {"action_label": "Incident Reported", "actor_name": "Owner"},
+                "created_at": "2026-10-11T10:00:00Z",
+            }
+        ]
+
+        def table_side_effect(table_name):
+            mock = MagicMock()
+            if table_name == "incidents":
+                mock.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = [{
+                    "id": "inc-own", "user_id": "cit-owner", "status": "reported"
+                }]
+            elif table_name == "incident_events":
+                mock.select.return_value.eq.return_value.order.return_value.order.return_value.range.return_value.execute.return_value.data = mock_events
+            elif table_name == "profiles":
+                mock.select.return_value.in_.return_value.execute.return_value.data = []
+            return mock
+
+        mock_supabase.table.side_effect = table_side_effect
+
+        resp = self.client.get("/incidents/inc-own/events")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["incident_id"], "inc-own")
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["events"][0]["event_type"], "incident_created")
+
+    @patch("backend.main.supabase")
+    def test_get_incident_events_citizen_other_incident_forbidden(self, mock_supabase):
+        """Citizen cannot retrieve audit events for another user's incident (403)."""
+        citizen = {"id": "cit-intruder", "role": "citizen", "email": "intruder@test.com"}
+        app.dependency_overrides[get_current_user] = lambda: citizen
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = [{
+            "id": "inc-victim", "user_id": "cit-victim", "status": "reported"
+        }]
+        mock_supabase.table.return_value = mock_table
+
+        resp = self.client.get("/incidents/inc-victim/events")
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("You can only view audit events for your own incidents", resp.json()["detail"])
+
+    @patch("backend.main.supabase")
+    def test_get_incident_events_operational_roles_allowed(self, mock_supabase):
+        """Operational roles (command_center, responder, admin) can access any incident's audit events."""
+        roles_to_test = ["command_center", "responder", "admin", "hospital", "shelter"]
+
+        for r in roles_to_test:
+            with self.subTest(role=r):
+                user = {"id": f"user-{r}", "role": r, "email": f"{r}@test.com"}
+                app.dependency_overrides[get_current_user] = lambda: user
+
+                def table_side_effect(table_name):
+                    mock = MagicMock()
+                    if table_name == "incidents":
+                        mock.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = [{
+                            "id": "inc-any", "user_id": "someone-else", "status": "in_progress"
+                        }]
+                    elif table_name == "incident_events":
+                        mock.select.return_value.eq.return_value.order.return_value.order.return_value.range.return_value.execute.return_value.data = [{
+                            "id": "ev-100", "incident_id": "inc-any", "event_type": "status_changed",
+                            "created_at": "2026-10-11T12:00:00Z"
+                        }]
+                    elif table_name == "profiles":
+                        mock.select.return_value.in_.return_value.execute.return_value.data = []
+                    return mock
+
+                mock_supabase.table.side_effect = table_side_effect
+
+                resp = self.client.get("/incidents/inc-any/events")
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(resp.json()["count"], 1)
+
+    @patch("backend.main.supabase")
+    def test_get_incident_events_ordering_and_pagination_clamping(self, mock_supabase):
+        """GET /incidents/{id}/events respects ordering and clamps limit/offset parameters."""
+        admin = {"id": "admin-1", "role": "admin", "email": "admin@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: admin
+
+        range_calls = []
+
+        def table_side_effect(table_name):
+            mock = MagicMock()
+            if table_name == "incidents":
+                mock.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = [{
+                    "id": "inc-paging", "user_id": "cit-1", "status": "reported"
+                }]
+            elif table_name == "incident_events":
+                def record_range(start, end):
+                    range_calls.append((start, end))
+                    m = MagicMock()
+                    m.execute.return_value.data = []
+                    return m
+                query_mock = mock.select.return_value.eq.return_value.order.return_value.order.return_value
+                query_mock.range.side_effect = record_range
+            return mock
+
+        mock_supabase.table.side_effect = table_side_effect
+
+        # Limit beyond 100 is clamped to 100
+        resp = self.client.get("/incidents/inc-paging/events?limit=500&offset=5&order=asc")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["limit"], 100)
+        self.assertEqual(data["offset"], 5)
+        self.assertEqual(data["order"], "asc")
+        self.assertEqual(range_calls[0], (5, 104))
+
 
 if __name__ == "__main__":
     unittest.main()

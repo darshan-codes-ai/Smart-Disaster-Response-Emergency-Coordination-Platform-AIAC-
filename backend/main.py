@@ -266,6 +266,68 @@ def enrich_incident_data(incident: dict, responder_lookup: Optional[dict] = None
     return inc
 
 
+def get_default_action_label(event_type: Optional[str], new_state: Optional[dict] = None) -> str:
+    """Return a descriptive human-readable action label for an event type."""
+    if event_type == "incident_created":
+        return "Incident Reported"
+    elif event_type == "responder_assigned":
+        name = (new_state or {}).get("assigned_responder_name")
+        return f"Assigned to {name}" if name else "Responder Assigned"
+    elif event_type == "responder_unassigned":
+        return "Responder Unassigned"
+    elif event_type == "status_changed":
+        st = (new_state or {}).get("status")
+        return f"Status changed to {st}" if st else "Status Changed"
+    elif event_type == "note_added":
+        return "Field Note Added"
+    elif event_type == "note_updated":
+        return "Field Note Updated"
+    return "Incident Updated"
+
+
+def log_incident_event(
+    incident_id: str,
+    actor_id: Optional[str],
+    event_type: str,
+    previous_state: Optional[dict] = None,
+    new_state: Optional[dict] = None,
+    metadata: Optional[dict] = None,
+    created_at: Optional[str] = None,
+) -> Optional[dict]:
+    """Record an immutable audit event for an incident.
+
+    actor_id is always derived from authenticated user (never client input).
+    """
+    now = created_at or datetime.now(timezone.utc).isoformat()
+    meta = dict(metadata or {})
+    if "action_label" not in meta:
+        meta["action_label"] = get_default_action_label(event_type, new_state)
+
+    event_record = {
+        "id": str(uuid.uuid4()),
+        "incident_id": incident_id,
+        "actor_id": actor_id,
+        "event_type": event_type,
+        "previous_state": previous_state,
+        "new_state": new_state,
+        "metadata": meta,
+        "created_at": now,
+    }
+    try:
+        res = (
+            supabase
+            .table("incident_events")
+            .insert(event_record)
+            .execute()
+        )
+        if res.data:
+            return res.data[0]
+        return event_record
+    except Exception as exc:
+        print(f"Warning: Failed to persist audit event {event_type} for incident {incident_id}: {exc}")
+        return None
+
+
 # ============================================================
 # AUTHENTICATION / RBAC
 # ============================================================
@@ -469,9 +531,31 @@ def create_incident(
                 detail="Incident could not be created"
             )
 
+        created_row = response.data[0]
+        log_incident_event(
+            incident_id=incident_id,
+            actor_id=current_user["id"],
+            event_type="incident_created",
+            previous_state=None,
+            new_state={
+                "status": "reported",
+                "type": incident.type,
+                "severity": severity,
+                "description": incident.description,
+                "latitude": incident.location.lat,
+                "longitude": incident.location.lng,
+            },
+            metadata={
+                "actor_name": current_user.get("full_name") or "Reporter",
+                "actor_role": current_user.get("role") or "citizen",
+                "action_label": "Incident Reported",
+            },
+            created_at=now,
+        )
+
         return {
             "message": "Incident created successfully",
-            "incident": enrich_incident_data(response.data[0])
+            "incident": enrich_incident_data(created_row)
         }
 
     except HTTPException:
@@ -798,6 +882,87 @@ def update_incident(
             except Exception:
                 pass
 
+        # ----------------------------------------------------
+        # AUDIT TRAIL LOGGING (PHASE 5.1)
+        # ----------------------------------------------------
+        actor_id = current_user["id"]
+        actor_name = current_user.get("full_name") or "User"
+        actor_role = current_user.get("role") or "citizen"
+
+        # 1. Status change event
+        old_status = incident.get("status")
+        new_status = updated_row.get("status")
+        if new_status and old_status != new_status:
+            log_incident_event(
+                incident_id=incident_id,
+                actor_id=actor_id,
+                event_type="status_changed",
+                previous_state={"status": old_status},
+                new_state={"status": new_status},
+                metadata={
+                    "actor_name": actor_name,
+                    "actor_role": actor_role,
+                    "action_label": f"Status changed to {new_status}",
+                },
+            )
+
+        # 2. Responder assignment / unassignment event
+        if has_assignment_change:
+            old_assigned = incident.get("assigned_to")
+            new_assigned = updated_row.get("assigned_to")
+            old_assigned_str = str(old_assigned) if old_assigned else None
+            new_assigned_str = str(new_assigned) if new_assigned else None
+            if old_assigned_str != new_assigned_str:
+                if new_assigned is not None:
+                    target_name = responder_lookup.get(str(new_assigned))
+                    if not target_name and "target_profile" in locals() and target_profile:
+                        target_name = target_profile.get("full_name")
+                    log_incident_event(
+                        incident_id=incident_id,
+                        actor_id=actor_id,
+                        event_type="responder_assigned",
+                        previous_state={"assigned_to": old_assigned},
+                        new_state={"assigned_to": new_assigned, "assigned_responder_name": target_name},
+                        metadata={
+                            "actor_name": actor_name,
+                            "actor_role": actor_role,
+                            "assigned_responder_name": target_name,
+                            "action_label": f"Assigned to {target_name or 'responder'}",
+                        },
+                    )
+                else:
+                    log_incident_event(
+                        incident_id=incident_id,
+                        actor_id=actor_id,
+                        event_type="responder_unassigned",
+                        previous_state={"assigned_to": old_assigned},
+                        new_state={"assigned_to": None},
+                        metadata={
+                            "actor_name": actor_name,
+                            "actor_role": actor_role,
+                            "action_label": "Responder unassigned",
+                        },
+                    )
+
+        # 3. Field note event
+        old_note = incident.get("note")
+        new_note = updated_row.get("note")
+        if "note" in update.model_fields_set and (old_note != new_note):
+            ev_type = "note_added" if not old_note else "note_updated"
+            act_label = "Field note added" if not old_note else "Field note updated"
+            log_incident_event(
+                incident_id=incident_id,
+                actor_id=actor_id,
+                event_type=ev_type,
+                previous_state={"note": old_note},
+                new_state={"note": new_note},
+                metadata={
+                    "actor_name": actor_name,
+                    "actor_role": actor_role,
+                    "action_label": act_label,
+                },
+            )
+
         enriched = enrich_incident_data(updated_row, responder_lookup)
         return {
             "message": "Incident updated successfully",
@@ -810,4 +975,126 @@ def update_incident(
         raise HTTPException(
             status_code=500,
             detail=f"Database error: {str(e)}"
+        )
+
+
+# ============================================================
+# GET INCIDENT AUDIT EVENTS (PHASE 5.1)
+# ============================================================
+
+@app.get("/incidents/{incident_id}/events")
+def get_incident_events(
+    incident_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    order: str = "desc",
+    current_user=Depends(get_current_user),
+):
+    """Retrieve persistent audit history for an incident.
+
+    Access Rules:
+    - Operational roles (responder, command_center, admin, hospital, shelter)
+      receive audit events for any incident.
+    - Citizens only receive audit events for incidents they personally reported.
+    - Events are ordered deterministically by created_at, with bounded pagination.
+    """
+    clamped_limit = max(1, min(100, limit))
+    clamped_offset = max(0, offset)
+    is_desc = order.strip().lower() != "asc"
+
+    try:
+        # 1. Verify incident existence & enforce authorization
+        incident_res = (
+            supabase
+            .table("incidents")
+            .select("id, user_id, status")
+            .eq("id", incident_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not incident_res.data:
+            raise HTTPException(
+                status_code=404,
+                detail="Incident not found"
+            )
+
+        incident = incident_res.data[0]
+        user_role = current_user.get("role", "citizen")
+        user_id = current_user.get("id")
+
+        if user_role not in OPERATIONAL_ROLES and str(incident.get("user_id")) != str(user_id):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only view audit events for your own incidents"
+            )
+
+        # 2. Query incident events with deterministic ordering
+        events_query = (
+            supabase
+            .table("incident_events")
+            .select("*")
+            .eq("incident_id", incident_id)
+            .order("created_at", desc=is_desc)
+            .order("id", desc=is_desc)
+            .range(clamped_offset, clamped_offset + clamped_limit - 1)
+        )
+        events_res = events_query.execute()
+        raw_events = events_res.data or []
+
+        # 3. Enrich missing actor profile details
+        actor_ids = list({str(ev["actor_id"]) for ev in raw_events if ev.get("actor_id")})
+        actor_lookup = {}
+        if actor_ids:
+            try:
+                prof_res = (
+                    supabase
+                    .table("profiles")
+                    .select("id, full_name, role")
+                    .in_("id", actor_ids)
+                    .execute()
+                )
+                for prof in prof_res.data or []:
+                    actor_lookup[str(prof["id"])] = {
+                        "full_name": prof.get("full_name") or "User",
+                        "role": prof.get("role") or "citizen",
+                    }
+            except Exception:
+                pass
+
+        enriched_events = []
+        for ev in raw_events:
+            event_copy = dict(ev)
+            meta = dict(event_copy.get("metadata") or {})
+            actor_id = str(event_copy.get("actor_id")) if event_copy.get("actor_id") else None
+
+            if not meta.get("action_label"):
+                meta["action_label"] = get_default_action_label(
+                    event_copy.get("event_type"), event_copy.get("new_state")
+                )
+
+            if actor_id and actor_id in actor_lookup:
+                if not meta.get("actor_name"):
+                    meta["actor_name"] = actor_lookup[actor_id]["full_name"]
+                if not meta.get("actor_role"):
+                    meta["actor_role"] = actor_lookup[actor_id]["role"]
+
+            event_copy["metadata"] = meta
+            enriched_events.append(event_copy)
+
+        return {
+            "incident_id": incident_id,
+            "count": len(enriched_events),
+            "limit": clamped_limit,
+            "offset": clamped_offset,
+            "order": "desc" if is_desc else "asc",
+            "events": enriched_events,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error loading audit events: {str(exc)}"
         )

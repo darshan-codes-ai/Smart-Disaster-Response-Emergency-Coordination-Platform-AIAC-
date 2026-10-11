@@ -35,6 +35,23 @@ interface Responder {
   role: string;
 }
 
+interface IncidentEvent {
+  id: string;
+  incident_id: string;
+  actor_id: string | null;
+  event_type: string;
+  previous_state: Record<string, string | number | boolean | null> | null;
+  new_state: Record<string, string | number | boolean | null> | null;
+  metadata: {
+    action_label?: string;
+    actor_name?: string;
+    actor_role?: string;
+    assigned_responder_name?: string;
+    [key: string]: string | number | boolean | null | undefined;
+  };
+  created_at: string;
+}
+
 type OperatingMode = "all" | "normal" | "disaster" | "world_cup";
 type PriorityFilter = "all" | "critical" | "high" | "medium" | "low";
 type DetailsTab = "triage" | "operator" | "details" | "activity";
@@ -186,13 +203,57 @@ export default function CommandCenterPage() {
   const [replaceExistingDemo, setReplaceExistingDemo] = useState<boolean>(false);
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
 
+  // Persistent Audit History (Phase 5.1)
+  const [auditEvents, setAuditEvents] = useState<IncidentEvent[]>([]);
+  const [eventsLoading, setEventsLoading] = useState<boolean>(false);
+  const [eventsError, setEventsError] = useState<string | null>(null);
+
+  const fetchAuditEvents = useCallback(async (incidentId: string) => {
+    try {
+      setEventsLoading(true);
+      setEventsError(null);
+      const token = await getAccessToken();
+      if (!token) return;
+
+      let res = await requestWithToken(`${API_URL}/incidents/${incidentId}/events`, token);
+      if (res.status === 401) {
+        const freshToken = await getAccessToken(true);
+        if (freshToken) {
+          res = await requestWithToken(`${API_URL}/incidents/${incidentId}/events`, freshToken);
+        }
+      }
+
+      if (!res.ok) {
+        let detail = "Failed to load audit history";
+        try {
+          const errData = await res.json();
+          if (errData?.detail) detail = errData.detail;
+        } catch {
+          // ignore
+        }
+        throw new Error(detail);
+      }
+
+      const data = await res.json();
+      setAuditEvents(Array.isArray(data?.events) ? data.events : []);
+    } catch (err) {
+      console.error("Failed to load audit events:", err);
+      setEventsError(err instanceof Error ? err.message : "Failed to load audit history");
+    } finally {
+      setEventsLoading(false);
+    }
+  }, []);
+
   const handleSelectIncident = useCallback((inc: Incident | null) => {
     setSelectedIncident(inc);
     setFieldNoteText(inc?.note || "");
     if (inc) {
       setShowDetails(true);
+      fetchAuditEvents(inc.id);
+    } else {
+      setAuditEvents([]);
     }
-  }, []);
+  }, [fetchAuditEvents]);
 
   // ------------------------------------------------------------
   // FETCH INCIDENTS (WITH ACCESS TOKEN HANDLING)
@@ -382,6 +443,7 @@ export default function CommandCenterPage() {
 
       if (selectedIncident?.id === incidentId) {
         setSelectedIncident(updatedIncident);
+        fetchAuditEvents(incidentId);
       }
 
       let msg = "Incident updated successfully.";
@@ -1195,7 +1257,12 @@ export default function CommandCenterPage() {
                     <button
                       key={tab}
                       type="button"
-                      onClick={() => setActiveDetailsTab(tab)}
+                      onClick={() => {
+                        setActiveDetailsTab(tab);
+                        if (tab === "activity" && selectedIncident) {
+                          fetchAuditEvents(selectedIncident.id);
+                        }
+                      }}
                       className={`flex-1 py-1.5 text-center uppercase font-bold transition border-b-2 ${
                         active
                           ? "border-cyan-400 text-cyan-300 bg-cyan-950/20"
@@ -1435,51 +1502,140 @@ export default function CommandCenterPage() {
 
                 {/* ---------------- TAB 4: ACTIVITY / HISTORY ---------------- */}
                 {activeDetailsTab === "activity" && (
-                  <div className="space-y-2 text-xs font-mono">
-                    <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
-                      Audit Timeline
-                    </span>
-
-                    {/* Timeline items derived from factual database fields */}
-                    <div className="space-y-2 border-l border-white/10 pl-3 ml-1">
-                      {/* Initial Report Event */}
-                      <div className="relative">
-                        <span className="absolute -left-[17px] top-1 h-2 w-2 rounded-full bg-cyan-400"></span>
-                        <p className="text-[11px] text-slate-200 font-bold">Incident Reported</p>
-                        <p className="text-[10px] text-slate-500">
-                          {selectedIncident.created_at ? new Date(selectedIncident.created_at).toLocaleString() : "Reported"}
-                        </p>
+                  <div className="space-y-2.5 text-xs font-mono">
+                    {/* Header bar with count and refresh */}
+                    <div className="flex items-center justify-between pb-1.5 border-b border-white/10">
+                      <span className="text-[10px] uppercase font-bold text-cyan-400 tracking-wider flex items-center gap-1.5">
+                        <span>📜</span>
+                        <span>Persistent Audit Trail</span>
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[9px] bg-black/40 border border-white/10 px-1.5 py-0.5 rounded text-slate-400">
+                          {auditEvents.length} Events
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => fetchAuditEvents(selectedIncident.id)}
+                          disabled={eventsLoading}
+                          title="Refresh audit history"
+                          className="text-[11px] text-slate-400 hover:text-white transition disabled:opacity-50"
+                        >
+                          ↻
+                        </button>
                       </div>
-
-                      {/* Assignment Event if assigned */}
-                      {selectedIncident.assigned_to && (
-                        <div className="relative">
-                          <span className="absolute -left-[17px] top-1 h-2 w-2 rounded-full bg-purple-400"></span>
-                          <p className="text-[11px] text-purple-300 font-bold">
-                            Dispatched to {selectedIncident.assigned_responder_name || "Unit"}
-                          </p>
-                          <p className="text-[10px] text-slate-500">Active response assignment</p>
-                        </div>
-                      )}
-
-                      {/* Current Status Event */}
-                      <div className="relative">
-                        <span className="absolute -left-[17px] top-1 h-2 w-2 rounded-full bg-emerald-400"></span>
-                        <p className="text-[11px] text-emerald-300 font-bold capitalize">
-                          Current State: {selectedIncident.status || "Reported"}
-                        </p>
-                        <p className="text-[10px] text-slate-500">Verified operational workflow state</p>
-                      </div>
-
-                      {/* Field Note Event */}
-                      {selectedIncident.note && (
-                        <div className="relative">
-                          <span className="absolute -left-[17px] top-1 h-2 w-2 rounded-full bg-amber-400"></span>
-                          <p className="text-[11px] text-amber-300 font-bold">Field Note Logged</p>
-                          <p className="text-[10px] text-slate-400 italic">&ldquo;{selectedIncident.note}&rdquo;</p>
-                        </div>
-                      )}
                     </div>
+
+                    {/* Loading State */}
+                    {eventsLoading && (
+                      <div className="flex flex-col items-center justify-center py-8 text-slate-400 gap-2">
+                        <div className="h-5 w-5 rounded-full border-2 border-cyan-500 border-t-transparent animate-spin"></div>
+                        <span className="text-[10px] text-slate-400">Loading audit history...</span>
+                      </div>
+                    )}
+
+                    {/* Error State */}
+                    {!eventsLoading && eventsError && (
+                      <div className="p-2.5 rounded bg-red-950/40 border border-red-500/30 text-red-200 text-[11px] space-y-1">
+                        <div className="flex items-center gap-1.5">
+                          <span>⚠️</span>
+                          <span>{eventsError}</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => fetchAuditEvents(selectedIncident.id)}
+                          className="text-[10px] text-cyan-400 hover:underline font-bold"
+                        >
+                          Retry
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Empty State */}
+                    {!eventsLoading && !eventsError && auditEvents.length === 0 && (
+                      <div className="flex flex-col items-center justify-center py-8 text-slate-500 text-center px-2">
+                        <span className="text-xl mb-1">📋</span>
+                        <p className="text-[11px] text-slate-300 font-bold uppercase">No Audit Events Logged</p>
+                        <p className="text-[10px] text-slate-500 mt-0.5">
+                          Audit events are recorded when incidents are reported, updated, or dispatched.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Timeline items */}
+                    {!eventsLoading && !eventsError && auditEvents.length > 0 && (
+                      <div className="space-y-3 border-l border-white/10 pl-3.5 ml-1.5 mt-2">
+                        {auditEvents.map((event) => {
+                          let markerColor = "bg-slate-400";
+                          if (event.event_type === "incident_created") {
+                            markerColor = "bg-cyan-400 ring-2 ring-cyan-500/30";
+                          } else if (event.event_type === "status_changed") {
+                            markerColor = "bg-emerald-400 ring-2 ring-emerald-500/30";
+                          } else if (event.event_type === "responder_assigned") {
+                            markerColor = "bg-purple-400 ring-2 ring-purple-500/30";
+                          } else if (event.event_type === "responder_unassigned") {
+                            markerColor = "bg-amber-400 ring-2 ring-amber-500/30";
+                          } else if (event.event_type === "note_added" || event.event_type === "note_updated") {
+                            markerColor = "bg-sky-400 ring-2 ring-sky-500/30";
+                          }
+
+                          const label = event.metadata?.action_label || event.event_type.replace(/_/g, " ");
+                          const actorName = event.metadata?.actor_name || "System Operator";
+                          const actorRole = event.metadata?.actor_role || "user";
+
+                          return (
+                            <div key={event.id} className="relative group">
+                              <span
+                                className={`absolute -left-[19px] top-1 h-2 w-2 rounded-full ${markerColor}`}
+                              ></span>
+
+                              <div className="flex items-start justify-between gap-1">
+                                <span className="text-[11px] font-bold text-slate-200 capitalize">
+                                  {label}
+                                </span>
+                                <span className="text-[9px] text-slate-500 shrink-0">
+                                  {formatRelativeTime(event.created_at)}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-0.5">
+                                <span>by</span>
+                                <strong className="text-cyan-300 font-semibold">{actorName}</strong>
+                                <span className="text-[9px] text-slate-500 uppercase">({actorRole})</span>
+                              </div>
+
+                              {/* State changes / details */}
+                              {event.event_type === "status_changed" && Boolean(event.new_state) && (
+                                <div className="mt-1 bg-black/30 border border-white/5 p-1 rounded text-[10px] text-slate-300 flex items-center gap-1.5">
+                                  <span className="text-slate-500">Transition:</span>
+                                  <span className="text-slate-400">{String(event.previous_state?.status || "reported")}</span>
+                                  <span>→</span>
+                                  <span className="text-emerald-400 font-bold uppercase">{String(event.new_state?.status || "")}</span>
+                                </div>
+                              )}
+
+                              {event.event_type === "responder_assigned" && (
+                                <div className="mt-1 bg-purple-950/20 border border-purple-500/20 p-1 rounded text-[10px] text-purple-200 flex items-center gap-1">
+                                  <span>👤 Unit:</span>
+                                  <span className="font-bold">
+                                    {String(event.metadata?.assigned_responder_name || event.new_state?.assigned_to || "Assigned")}
+                                  </span>
+                                </div>
+                              )}
+
+                              {(event.event_type === "note_added" || event.event_type === "note_updated") && Boolean(event.new_state?.note) && (
+                                <div className="mt-1 bg-sky-950/20 border border-sky-500/20 p-1.5 rounded text-[10px] text-sky-200 italic">
+                                  &ldquo;{String(event.new_state?.note)}&rdquo;
+                                </div>
+                              )}
+
+                              <p className="text-[9px] text-slate-500 mt-0.5">
+                                {new Date(event.created_at).toLocaleString()}
+                              </p>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
