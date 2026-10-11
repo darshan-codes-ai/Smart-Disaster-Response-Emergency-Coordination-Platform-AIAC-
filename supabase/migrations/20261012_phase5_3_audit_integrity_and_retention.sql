@@ -156,3 +156,64 @@ $$;
 revoke all on function public.update_incident_with_audit from public, anon, authenticated;
 grant execute on function public.update_incident_with_audit to service_role;
 
+<<<<<<< HEAD
+=======
+
+-- Transactional incident creation + audit event.
+create or replace function public.create_incident_with_audit(
+  p_incident jsonb,
+  p_actor_id uuid,
+  p_actor_name text default 'Reporter',
+  p_actor_role text default 'citizen'
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_incident public.incidents%rowtype;
+begin
+  insert into public.incidents (
+    id, user_id, type, description, latitude, longitude, severity,
+    status, priority_score, assigned_to, note, created_at, updated_at
+  )
+  values (
+    coalesce((p_incident->>'id')::uuid, gen_random_uuid()),
+    p_actor_id,
+    p_incident->>'type',
+    p_incident->>'description',
+    (p_incident->>'latitude')::double precision,
+    (p_incident->>'longitude')::double precision,
+    coalesce((p_incident->>'severity')::integer, 3),
+    'reported',
+    coalesce((p_incident->>'priority_score')::double precision, 60),
+    null,
+    null,
+    coalesce((p_incident->>'created_at')::timestamptz, now()),
+    coalesce((p_incident->>'updated_at')::timestamptz, now())
+  )
+  returning * into v_incident;
+
+  insert into public.incident_events (
+    incident_id, actor_id, event_type, previous_state, new_state, metadata, created_at
+  )
+  values (
+    v_incident.id, p_actor_id, 'incident_created', null,
+    jsonb_build_object(
+      'status', v_incident.status, 'type', v_incident.type,
+      'severity', v_incident.severity, 'description', v_incident.description,
+      'latitude', v_incident.latitude, 'longitude', v_incident.longitude
+    ),
+    jsonb_build_object('actor_name', p_actor_name, 'actor_role', p_actor_role,
+                       'action_label', 'Incident Reported'),
+    v_incident.created_at
+  );
+
+  return to_jsonb(v_incident);
+end;
+$$;
+
+revoke all on function public.create_incident_with_audit(jsonb, uuid, text, text) from public, anon, authenticated;
+grant execute on function public.create_incident_with_audit(jsonb, uuid, text, text) to service_role;
+>>>>>>> 850e5e45eb0fbd8dda8a433e216fd643e6f9a844
