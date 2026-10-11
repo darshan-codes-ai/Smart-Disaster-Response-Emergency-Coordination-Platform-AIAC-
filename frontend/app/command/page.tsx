@@ -364,6 +364,25 @@ export default function CommandCenterPage() {
             setMapRefreshTrigger((n) => n + 1);
           }
         )
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "incident_events",
+            ...(selectedIncident?.id
+              ? { filter: `incident_id=eq.${selectedIncident.id}` }
+              : {}),
+          },
+          (payload) => {
+            const row = (payload.new && Object.keys(payload.new).length
+              ? payload.new
+              : payload.old) as { incident_id?: string } | undefined;
+            if (selectedIncident?.id && row?.incident_id === selectedIncident.id) {
+              void fetchAuditEvents(selectedIncident.id);
+            }
+          }
+        )
         .subscribe((status) => {
           if (status === "SUBSCRIBED") {
             setRealtimeState("live");
@@ -390,7 +409,7 @@ export default function CommandCenterPage() {
         }
       }
     };
-  }, [fetchIncidents]);
+  }, [fetchIncidents, fetchAuditEvents, selectedIncident?.id]);
 
   // ------------------------------------------------------------
   // UPDATE INCIDENT (STATUS, NOTE, DISPATCH ASSIGNMENT)
