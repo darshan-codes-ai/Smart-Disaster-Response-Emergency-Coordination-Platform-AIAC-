@@ -22,11 +22,15 @@ export interface Incident {
   updated_at?: string | null;
 }
 
-interface DisasterMapProps {
+export interface DisasterMapProps {
   onIncidentSelect?: (incident: Incident | null) => void;
   selectedIncidentId?: string | null;
   onIncidentsLoaded?: (incidents: Incident[]) => void;
   refreshTrigger?: number;
+  incidents?: Incident[];
+  hideToolbar?: boolean;
+  fullHeight?: boolean;
+  showLayerPanel?: boolean;
 }
 
 // Fallback center coordinates (Telangana / Warangal area where initial incidents are located)
@@ -122,6 +126,10 @@ export default function DisasterMap({
   selectedIncidentId,
   onIncidentsLoaded,
   refreshTrigger,
+  incidents: propIncidents,
+  hideToolbar = false,
+  fullHeight = false,
+  showLayerPanel = false,
 }: DisasterMapProps) {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -131,12 +139,20 @@ export default function DisasterMap({
   const isInitialLoadRef = useRef<boolean>(true);
   const isMountedRef = useRef<boolean>(true);
 
-  const [incidents, setIncidents] = useState<Incident[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [internalIncidents, setInternalIncidents] = useState<Incident[]>([]);
+  const incidents = propIncidents !== undefined ? propIncidents : internalIncidents;
+  const [loading, setLoading] = useState<boolean>(propIncidents === undefined);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [locationMessage, setLocationMessage] = useState<string | null>(null);
   const [locatingUser, setLocatingUser] = useState<boolean>(false);
+
+  // Floating layer controls
+  const [showFloatingLayers, setShowFloatingLayers] = useState<boolean>(false);
+  const [layerIncidents, setLayerIncidents] = useState<boolean>(true);
+  const [layerResponders, setLayerResponders] = useState<boolean>(true);
+  const [layerClusters, setLayerClusters] = useState<boolean>(false);
+  const [layerHeatmap, setLayerHeatmap] = useState<boolean>(false);
 
   // ------------------------------------------------------------
   // FETCH INCIDENTS FROM BACKEND
@@ -192,7 +208,7 @@ export default function DisasterMap({
           : [];
 
         if (isMountedRef.current) {
-          setIncidents(fetchedIncidents);
+          setInternalIncidents(fetchedIncidents);
           onIncidentsLoaded?.(fetchedIncidents);
           setErrorMessage(null);
         }
@@ -214,6 +230,24 @@ export default function DisasterMap({
     },
     [onIncidentsLoaded]
   );
+
+  // Resize observer to keep map canvas sized correctly on layout changes
+  useEffect(() => {
+    if (!mapContainerRef.current) return;
+    const observer = new ResizeObserver(() => {
+      mapRef.current?.resize();
+    });
+    observer.observe(mapContainerRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  // Sync layer visibility
+  useEffect(() => {
+    markersRef.current.forEach((m) => {
+      m.getElement().style.display = layerIncidents ? "flex" : "none";
+    });
+  }, [layerIncidents]);
+
   // ------------------------------------------------------------
   // INITIALIZE MAP
   // ------------------------------------------------------------
@@ -230,10 +264,14 @@ export default function DisasterMap({
           sources: {
             "osm-tiles": {
               type: "raster",
-              tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+              tiles: [
+                "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
+                "https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
+                "https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
+              ],
               tileSize: 256,
               attribution:
-                '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
+                '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener noreferrer">CARTO</a>',
             },
           },
           layers: [
@@ -305,21 +343,24 @@ export default function DisasterMap({
   useEffect(() => {
     let ignore = false;
 
-    Promise.resolve().then(() => {
-      if (!ignore && isMountedRef.current) {
-        fetchIncidents();
-      }
-    });
+    if (propIncidents === undefined) {
+      Promise.resolve().then(() => {
+        if (!ignore && isMountedRef.current) {
+          fetchIncidents();
+        }
+      });
+    }
 
     return () => {
       ignore = true;
     };
-  }, [fetchIncidents, refreshTrigger]);
+  }, [fetchIncidents, refreshTrigger, propIncidents]);
 
   // ------------------------------------------------------------
   // AUTOMATIC REFRESH INTERVAL (15 seconds)
   // ------------------------------------------------------------
   useEffect(() => {
+    if (propIncidents !== undefined) return;
     const interval = setInterval(() => {
       if (isMountedRef.current) {
         fetchIncidents();
@@ -327,7 +368,7 @@ export default function DisasterMap({
     }, 15000);
 
     return () => clearInterval(interval);
-  }, [fetchIncidents]);
+  }, [fetchIncidents, propIncidents]);
 
   // ------------------------------------------------------------
   // CREATE INCIDENT POPUP CONTENT (Safe DOM creation to prevent XSS)
@@ -527,7 +568,7 @@ export default function DisasterMap({
       const pin = document.createElement("div");
       pin.className = `relative flex items-center justify-center w-9 h-9 rounded-full shadow-lg border-2 transition-all ${
         isSelected
-          ? "ring-4 ring-white ring-offset-2 ring-offset-[#05070d] scale-110"
+          ? "ring-4 ring-cyan-400 ring-offset-2 ring-offset-[#05070d] scale-110"
           : ""
       }`;
       pin.style.backgroundColor = config.color;
@@ -723,74 +764,82 @@ export default function DisasterMap({
   ).length;
 
   return (
-    <div className="relative flex flex-col w-full overflow-hidden rounded-2xl border border-white/10 bg-[#101522] shadow-2xl">
+    <div
+      className={
+        fullHeight
+          ? "relative flex flex-col w-full h-full bg-[#050811] overflow-hidden"
+          : "relative flex flex-col w-full overflow-hidden rounded-2xl border border-white/10 bg-[#101522] shadow-2xl"
+      }
+    >
       {/* ======================================================
-          TOP TOOLBAR / CONTROLS
+          TOP TOOLBAR / CONTROLS (Only when hideToolbar is false)
       ====================================================== */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 p-4 bg-[#0c101c]/90 backdrop-blur z-20">
-        <div className="flex items-center gap-3">
-          <div>
-            <h3 className="font-bold text-base text-white flex items-center gap-2">
-              <span>Nearby Disaster Map</span>
-              <span className="flex h-2 w-2 relative">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
-              </span>
-            </h3>
-            <p className="text-xs text-slate-400">
-              Live emergency activity in real time
-            </p>
+      {!hideToolbar && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 p-4 bg-[#0c101c]/90 backdrop-blur z-20">
+          <div className="flex items-center gap-3">
+            <div>
+              <h3 className="font-bold text-base text-white flex items-center gap-2">
+                <span>Nearby Disaster Map</span>
+                <span className="flex h-2 w-2 relative">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                </span>
+              </h3>
+              <p className="text-xs text-slate-400">
+                Live emergency activity in real time
+              </p>
+            </div>
+
+            {/* Incident Count Indicator */}
+            <div className="hidden sm:inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-white/5 border border-white/10 text-slate-300">
+              {loading ? (
+                <span className="flex items-center gap-1.5 text-slate-400">
+                  <span className="inline-block h-2 w-2 rounded-full bg-slate-400 animate-pulse"></span>
+                  Loading incidents...
+                </span>
+              ) : validIncidentsCount > 0 ? (
+                <span className="flex items-center gap-1.5 text-blue-400">
+                  <span className="inline-block h-2 w-2 rounded-full bg-blue-400"></span>
+                  {validIncidentsCount} {validIncidentsCount === 1 ? "incident" : "incidents"}
+                </span>
+              ) : (
+                <span className="text-slate-400">No incidents reported</span>
+              )}
+            </div>
           </div>
 
-          {/* Incident Count Indicator */}
-          <div className="hidden sm:inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-white/5 border border-white/10 text-slate-300">
-            {loading ? (
-              <span className="flex items-center gap-1.5 text-slate-400">
-                <span className="inline-block h-2 w-2 rounded-full bg-slate-400 animate-pulse"></span>
-                Loading incidents...
-              </span>
-            ) : validIncidentsCount > 0 ? (
-              <span className="flex items-center gap-1.5 text-blue-400">
-                <span className="inline-block h-2 w-2 rounded-full bg-blue-400"></span>
-                {validIncidentsCount} {validIncidentsCount === 1 ? "incident" : "incidents"}
-              </span>
-            ) : (
-              <span className="text-slate-400">No incidents reported</span>
-            )}
-          </div>
-        </div>
-
-        {/* Action Buttons: My Location & Refresh */}
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleMyLocation}
-            disabled={locatingUser}
-            aria-label="Show my location"
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-white/5 border border-white/10 text-slate-200 hover:bg-white/10 hover:border-blue-500/50 hover:text-white transition disabled:opacity-50"
-          >
-            <span>{locatingUser ? "⏳" : "📍"}</span>
-            <span>{locatingUser ? "Locating..." : "My Location"}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleManualRefresh}
-            disabled={isRefreshing}
-            aria-label="Refresh incidents"
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-white/5 border border-white/10 text-slate-200 hover:bg-white/10 hover:border-blue-500/50 hover:text-white transition disabled:opacity-50"
-          >
-            <span
-              className={`inline-block transition-transform duration-700 ${
-                isRefreshing ? "rotate-180" : ""
-              }`}
+          {/* Action Buttons: My Location & Refresh */}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleMyLocation}
+              disabled={locatingUser}
+              aria-label="Show my location"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-white/5 border border-white/10 text-slate-200 hover:bg-white/10 hover:border-blue-500/50 hover:text-white transition disabled:opacity-50"
             >
-              ↻
-            </span>
-            <span>{isRefreshing ? "Refreshing..." : "Refresh"}</span>
-          </button>
+              <span>{locatingUser ? "⏳" : "📍"}</span>
+              <span>{locatingUser ? "Locating..." : "My Location"}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleManualRefresh}
+              disabled={isRefreshing}
+              aria-label="Refresh incidents"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-white/5 border border-white/10 text-slate-200 hover:bg-white/10 hover:border-blue-500/50 hover:text-white transition disabled:opacity-50"
+            >
+              <span
+                className={`inline-block transition-transform duration-700 ${
+                  isRefreshing ? "rotate-180" : ""
+                }`}
+              >
+                ↻
+              </span>
+              <span>{isRefreshing ? "Refreshing..." : "Refresh"}</span>
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* ======================================================
           NOTIFICATION / ERROR BANNERS
@@ -834,8 +883,127 @@ export default function DisasterMap({
       {/* ======================================================
           MAP CANVAS CONTAINER
       ====================================================== */}
-      <div className="relative w-full h-[420px] sm:h-[480px] lg:h-[520px] bg-[#070b14]">
+      <div
+        className={
+          fullHeight
+            ? "relative w-full h-full flex-1 bg-[#050811]"
+            : "relative w-full h-[420px] sm:h-[480px] lg:h-[520px] bg-[#070b14]"
+        }
+      >
         <div ref={mapContainerRef} className="w-full h-full" />
+
+        {/* FLOATING MAP LAYERS PANEL (Section 6) */}
+        {showLayerPanel && (
+          <div className="absolute top-3 left-3 z-20">
+            {!showFloatingLayers ? (
+              <button
+                type="button"
+                onClick={() => setShowFloatingLayers(true)}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#080d1a]/90 hover:bg-[#0d1527] border border-cyan-500/30 text-cyan-300 text-[11px] font-bold shadow-xl backdrop-blur transition"
+              >
+                <span>🗺️</span>
+                <span>Map Layers</span>
+                <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse"></span>
+              </button>
+            ) : (
+              <div className="rounded-xl border border-cyan-500/30 bg-[#080d1a]/95 backdrop-blur-md p-3 shadow-2xl text-xs w-64 space-y-2.5 text-slate-200">
+                <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
+                  <span className="font-bold uppercase tracking-wider text-[11px] text-cyan-400 flex items-center gap-1.5">
+                    <span>🗺️</span>
+                    <span>Telemetry Layers</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowFloatingLayers(false)}
+                    className="text-slate-400 hover:text-white text-xs px-1"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                    Operational Layers
+                  </div>
+                  <label className="flex items-center justify-between cursor-pointer py-1 px-1.5 rounded hover:bg-white/5 transition">
+                    <span className="text-slate-200 flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={layerIncidents}
+                        onChange={(e) => setLayerIncidents(e.target.checked)}
+                        className="rounded accent-cyan-500"
+                      />
+                      <span>Incidents</span>
+                    </span>
+                    <span className="text-[9px] font-mono font-bold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">
+                      LIVE ({validIncidentsCount})
+                    </span>
+                  </label>
+                  <label className="flex items-center justify-between cursor-pointer py-1 px-1.5 rounded hover:bg-white/5 transition">
+                    <span className="text-slate-200 flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={layerResponders}
+                        onChange={(e) => setLayerResponders(e.target.checked)}
+                        className="rounded accent-cyan-500"
+                      />
+                      <span>Responders</span>
+                    </span>
+                    <span className="text-[9px] font-mono font-bold text-cyan-400 bg-cyan-500/10 px-1.5 py-0.5 rounded border border-cyan-500/20">
+                      ACTIVE
+                    </span>
+                  </label>
+                  <label className="flex items-center justify-between cursor-pointer py-1 px-1.5 rounded hover:bg-white/5 transition">
+                    <span className="text-slate-200 flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={layerClusters}
+                        onChange={(e) => setLayerClusters(e.target.checked)}
+                        className="rounded accent-cyan-500"
+                      />
+                      <span>Clusters</span>
+                    </span>
+                    <span className="text-[9px] font-mono text-slate-400 bg-white/5 px-1.5 py-0.5 rounded">
+                      AUTO
+                    </span>
+                  </label>
+                  <label className="flex items-center justify-between cursor-pointer py-1 px-1.5 rounded hover:bg-white/5 transition">
+                    <span className="text-slate-200 flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={layerHeatmap}
+                        onChange={(e) => setLayerHeatmap(e.target.checked)}
+                        className="rounded accent-cyan-500"
+                      />
+                      <span>Heatmap Density</span>
+                    </span>
+                    <span className="text-[9px] font-mono text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded">
+                      BETA
+                    </span>
+                  </label>
+                </div>
+
+                <div className="space-y-1 pt-1.5 border-t border-white/5">
+                  <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                    Planned Infrastructure
+                  </div>
+                  <div className="flex items-center justify-between py-0.5 px-1.5 text-slate-400 opacity-60">
+                    <span>Disaster Zones</span>
+                    <span className="text-[9px] font-mono text-slate-500">PHASE 5</span>
+                  </div>
+                  <div className="flex items-center justify-between py-0.5 px-1.5 text-slate-400 opacity-60">
+                    <span>Blocked Roads</span>
+                    <span className="text-[9px] font-mono text-slate-500">PHASE 6</span>
+                  </div>
+                  <div className="flex items-center justify-between py-0.5 px-1.5 text-slate-400 opacity-60">
+                    <span>Event Infrastructure</span>
+                    <span className="text-[9px] font-mono text-slate-500">PHASE 6</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Loading Overlay */}
         {loading && (

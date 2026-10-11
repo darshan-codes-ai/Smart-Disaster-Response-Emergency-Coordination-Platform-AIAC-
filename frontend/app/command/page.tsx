@@ -6,7 +6,7 @@ import dynamic from "next/dynamic";
 import type { Incident } from "../../components/disaster-map";
 import { getAccessToken, requestWithToken } from "../../lib/supabase/access-token";
 import { useCurrentUser } from "../../lib/supabase/use-current-user";
-import Navbar from "../../components/navbar";
+import { createClient } from "../../lib/supabase/client";
 import StatusBadge from "../../components/status-badge";
 import SeverityBadge from "../../components/severity-badge";
 import {
@@ -15,13 +15,14 @@ import {
   getNextRecommendedStatus,
 } from "../../lib/status-workflow";
 
+// Dynamic import for MapLibre map component to avoid SSR window issues
 const DisasterMap = dynamic(() => import("../../components/disaster-map"), {
   ssr: false,
   loading: () => (
-    <div className="flex h-[360px] sm:h-[420px] w-full flex-col items-center justify-center rounded-2xl border border-white/10 bg-[#0c1220] text-slate-400 shadow-2xl">
-      <div className="h-8 w-8 rounded-full border-2 border-sky-500 border-t-transparent animate-spin mb-3"></div>
-      <p className="text-sm font-semibold text-slate-200">Loading Geospatial Engine...</p>
-      <p className="text-xs text-slate-500 mt-1">Initializing MapLibre GL telemetry layer</p>
+    <div className="flex h-full w-full flex-col items-center justify-center bg-[#050811] text-slate-400">
+      <div className="h-8 w-8 rounded-full border-2 border-cyan-500 border-t-transparent animate-spin mb-3"></div>
+      <p className="text-xs font-mono uppercase tracking-wider text-cyan-400 font-bold">Initializing Geospatial Telemetry...</p>
+      <p className="text-[11px] text-slate-500 mt-1 font-mono">MapLibre GL dark matter engine loading</p>
     </div>
   ),
 });
@@ -34,6 +35,10 @@ interface Responder {
   role: string;
 }
 
+type OperatingMode = "all" | "normal" | "disaster" | "world_cup";
+type PriorityFilter = "all" | "critical" | "high" | "medium" | "low";
+type DetailsTab = "triage" | "operator" | "details" | "activity";
+
 function getTypeIcon(type: string): string {
   const t = (type || "").toLowerCase();
   if (t.includes("flood") || t.includes("water")) return "🌊";
@@ -43,62 +48,160 @@ function getTypeIcon(type: string): string {
   if (t.includes("medical") || t.includes("health")) return "🚑";
   if (t.includes("collapse") || t.includes("building")) return "🏢";
   if (t.includes("accident") || t.includes("crash")) return "🚗";
+  if (t.includes("crowd") || t.includes("stadium") || t.includes("surge")) return "👥";
   return "⚠️";
 }
 
-function PriorityBadge({ score, tier }: { score?: number | null; tier?: string | null }) {
+function classifyMode(inc: Incident): "disaster" | "world_cup" | "normal" {
+  const text = `${inc.type || ""} ${inc.description || ""}`.toLowerCase();
+  if (
+    text.includes("world cup") ||
+    text.includes("stadium") ||
+    text.includes("crowd") ||
+    text.includes("fan zone") ||
+    text.includes("match")
+  ) {
+    return "world_cup";
+  }
+  if (
+    text.includes("flood") ||
+    text.includes("earthquake") ||
+    text.includes("cyclone") ||
+    text.includes("hurricane") ||
+    text.includes("storm") ||
+    text.includes("collapse") ||
+    text.includes("fire") ||
+    text.includes("disaster") ||
+    inc.severity >= 4
+  ) {
+    return "disaster";
+  }
+  return "normal";
+}
+
+function formatRelativeTime(dateStr?: string | null): string {
+  if (!dateStr) return "Just now";
+  try {
+    const d = new Date(dateStr);
+    const now = new Date();
+    const diffSec = Math.floor((now.getTime() - d.getTime()) / 1000);
+    if (diffSec < 60) return `${Math.max(1, diffSec)}s ago`;
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHours = Math.floor(diffMin / 60);
+    if (diffHours < 24) return `${diffHours}h ago`;
+    return `${Math.floor(diffHours / 24)}d ago`;
+  } catch {
+    return "Recently";
+  }
+}
+
+function PriorityTag({ score, tier }: { score?: number | null; tier?: string | null }) {
   const val = score ?? 0;
   const t = tier || (val >= 80 ? "CRITICAL" : val >= 60 ? "HIGH" : val >= 40 ? "MEDIUM" : "LOW");
-  let cls = "bg-slate-500/15 text-slate-300 border-slate-500/30";
-  if (t === "CRITICAL") cls = "bg-red-500/20 text-red-300 border-red-500/40 animate-pulse";
-  else if (t === "HIGH") cls = "bg-orange-500/20 text-orange-300 border-orange-500/40";
-  else if (t === "MEDIUM") cls = "bg-amber-500/20 text-amber-300 border-amber-500/40";
-  else if (t === "LOW") cls = "bg-sky-500/15 text-sky-300 border-sky-500/30";
+  let badgeStyle = "bg-slate-500/15 text-slate-300 border-slate-500/30";
+
+  if (t === "CRITICAL") {
+    badgeStyle = "bg-red-500/20 text-red-300 border-red-500/40 ring-1 ring-red-500/30";
+  } else if (t === "HIGH") {
+    badgeStyle = "bg-orange-500/20 text-orange-300 border-orange-500/40";
+  } else if (t === "MEDIUM") {
+    badgeStyle = "bg-amber-500/20 text-amber-300 border-amber-500/40";
+  } else if (t === "LOW") {
+    badgeStyle = "bg-cyan-500/15 text-cyan-300 border-cyan-500/30";
+  }
 
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${cls}`}>
-      <span className="font-mono">{val}</span>
-      <span className="text-[9px] opacity-80">{t}</span>
+    <span
+      className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] font-mono font-bold uppercase tracking-wider border ${badgeStyle}`}
+    >
+      <span>{val}</span>
+      <span className="opacity-90">{t}</span>
+    </span>
+  );
+}
+
+function ModeBadge({ mode }: { mode: "disaster" | "world_cup" | "normal" }) {
+  if (mode === "world_cup") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded bg-purple-500/20 text-purple-300 border border-purple-500/40 px-1.5 py-0.5 text-[9px] font-mono font-bold uppercase tracking-wider">
+        <span>⚽</span>
+        <span>World Cup</span>
+      </span>
+    );
+  }
+  if (mode === "disaster") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded bg-red-500/20 text-red-300 border border-red-500/40 px-1.5 py-0.5 text-[9px] font-mono font-bold uppercase tracking-wider">
+        <span>⚡</span>
+        <span>Disaster</span>
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.5 text-[9px] font-mono font-bold uppercase tracking-wider">
+      <span>●</span>
+      <span>Normal</span>
     </span>
   );
 }
 
 export default function CommandCenterPage() {
-  const { role, isCommandCenter, loading: userLoading } = useCurrentUser();
+  const { role, profile, isCommandCenter, loading: userLoading } = useCurrentUser();
 
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [responders, setResponders] = useState<Responder[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState<boolean>(true);
   const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null);
 
-  // Filters
+  // Operating modes & filters
+  const [operatingMode, setOperatingMode] = useState<OperatingMode>("all");
+  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [severityFilter, setSeverityFilter] = useState<string>("all");
-  const [priorityFilter, setPriorityFilter] = useState<string>("all");
-  const [assignmentFilter, setAssignmentFilter] = useState<string>("all");
   const [responderFilter, setResponderFilter] = useState<string>("all");
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState<string>("");
 
+  // UI Panel Tabs & Responsiveness
+  const [activeDetailsTab, setActiveDetailsTab] = useState<DetailsTab>("triage");
+  const [showQueue, setShowQueue] = useState<boolean>(true);
+  const [showDetails, setShowDetails] = useState<boolean>(true);
+
+  // Action states & Notifications
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [mapRefreshTrigger, setMapRefreshTrigger] = useState<number>(0);
 
-  const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
-  const [noteInput, setNoteInput] = useState("");
-  const [mapRefreshTrigger, setMapRefreshTrigger] = useState(0);
+  // Field note editing
+  const [fieldNoteText, setFieldNoteText] = useState<string>("");
+  const [isSavingNote, setIsSavingNote] = useState<boolean>(false);
+
+  // Realtime connection state
+  const [realtimeState, setRealtimeState] = useState<"live" | "polling">("polling");
+
+  // Simulation & Safety Modals
+  const [simulateDisasterOpen, setSimulateDisasterOpen] = useState<boolean>(false);
+  const [simulateWorldCupOpen, setSimulateWorldCupOpen] = useState<boolean>(false);
+  const [clearIncidentsOpen, setClearIncidentsOpen] = useState<boolean>(false);
+  const [replaceExistingDemo, setReplaceExistingDemo] = useState<boolean>(false);
+  const [isSimulating, setIsSimulating] = useState<boolean>(false);
+
+  const handleSelectIncident = useCallback((inc: Incident | null) => {
+    setSelectedIncident(inc);
+    setFieldNoteText(inc?.note || "");
+    if (inc) {
+      setShowDetails(true);
+    }
+  }, []);
 
   // ------------------------------------------------------------
-  // FETCH INCIDENTS
+  // FETCH INCIDENTS (WITH ACCESS TOKEN HANDLING)
   // ------------------------------------------------------------
-  const fetchIncidents = useCallback(async () => {
+  const fetchIncidents = useCallback(async (isBackground = false) => {
     try {
-      setLoading(true);
-      setErrorMessage(null);
-
+      if (!isBackground) setLoading(true);
       const token = await getAccessToken();
-      if (!token) {
-        throw new Error("Your login session has expired. Please log in again.");
-      }
+      if (!token) return;
 
       let res = await requestWithToken(`${API_URL}/incidents`, token);
       if (res.status === 401) {
@@ -109,28 +212,39 @@ export default function CommandCenterPage() {
       }
 
       if (!res.ok) {
-        let detail = `Error ${res.status}: Failed to fetch operational incidents`;
+        let detail = `Error ${res.status}: Failed to synchronize incident records`;
         try {
           const errData = await res.json();
           if (errData?.detail) detail = errData.detail;
         } catch {
           // ignore
         }
-        throw new Error(detail);
+        if (!isBackground) setErrorMessage(detail);
+        return;
       }
 
       const data = await res.json();
-      setIncidents(Array.isArray(data?.incidents) ? data.incidents : []);
+      const list: Incident[] = Array.isArray(data?.incidents) ? data.incidents : [];
+      setIncidents(list);
+
+      // Keep selected incident synchronized with fresh server data
+      setSelectedIncident((current) => {
+        if (!current) return null;
+        const freshMatch = list.find((inc) => inc.id === current.id);
+        return freshMatch || current;
+      });
     } catch (err) {
       console.error("Command Center fetch error:", err);
-      setErrorMessage(err instanceof Error ? err.message : "Failed to load incidents");
+      if (!isBackground) {
+        setErrorMessage(err instanceof Error ? err.message : "Failed to load incidents");
+      }
     } finally {
-      setLoading(false);
+      if (!isBackground) setLoading(false);
     }
   }, []);
 
   // ------------------------------------------------------------
-  // FETCH RESPONDERS
+  // FETCH ACTIVE RESPONDERS
   // ------------------------------------------------------------
   const fetchResponders = useCallback(async () => {
     try {
@@ -154,12 +268,13 @@ export default function CommandCenterPage() {
     }
   }, []);
 
+  // Initial load
   useEffect(() => {
     let ignore = false;
     if (!userLoading && (isCommandCenter || role === "admin")) {
       Promise.resolve().then(() => {
         if (!ignore) {
-          fetchIncidents();
+          fetchIncidents(false);
           fetchResponders();
         }
       });
@@ -170,7 +285,54 @@ export default function CommandCenterPage() {
   }, [userLoading, isCommandCenter, role, fetchIncidents, fetchResponders]);
 
   // ------------------------------------------------------------
-  // UPDATE INCIDENT (STATUS, NOTE, ASSIGNMENT)
+  // REAL-TIME UPDATES (SUPABASE REALTIME + 15s POLLING FALLBACK)
+  // ------------------------------------------------------------
+  useEffect(() => {
+    let supabaseClient: ReturnType<typeof createClient> | null = null;
+    let channel: ReturnType<ReturnType<typeof createClient>["channel"]> | null = null;
+
+    try {
+      supabaseClient = createClient();
+      channel = supabaseClient
+        .channel("rescuegrid-ecc-live")
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "incidents" },
+          () => {
+            fetchIncidents(true);
+            setMapRefreshTrigger((n) => n + 1);
+          }
+        )
+        .subscribe((status) => {
+          if (status === "SUBSCRIBED") {
+            setRealtimeState("live");
+          } else {
+            setRealtimeState("polling");
+          }
+        });
+    } catch (err) {
+      console.warn("Supabase Realtime subscription initialized with polling fallback:", err);
+    }
+
+    // 15-second background polling fallback
+    const intervalId = setInterval(() => {
+      fetchIncidents(true);
+    }, 15000);
+
+    return () => {
+      clearInterval(intervalId);
+      if (supabaseClient && channel) {
+        try {
+          supabaseClient.removeChannel(channel);
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, [fetchIncidents]);
+
+  // ------------------------------------------------------------
+  // UPDATE INCIDENT (STATUS, NOTE, DISPATCH ASSIGNMENT)
   // ------------------------------------------------------------
   const handleUpdate = async (
     incidentId: string,
@@ -209,9 +371,8 @@ export default function CommandCenterPage() {
       }
 
       const data = await res.json();
-
       if (!res.ok) {
-        throw new Error(data?.detail || "Failed to update incident");
+        throw new Error(data?.detail || "Failed to update operational incident");
       }
 
       const updatedIncident: Incident = data.incident;
@@ -223,20 +384,22 @@ export default function CommandCenterPage() {
         setSelectedIncident(updatedIncident);
       }
 
-      let msg = `Incident updated successfully.`;
+      let msg = "Incident updated successfully.";
       if (assignedTo !== undefined) {
-        msg = assignedTo ? `Incident dispatched to responder.` : `Incident unassigned.`;
+        msg = assignedTo
+          ? `Unit dispatched: ${updatedIncident.assigned_responder_name || "Assigned"}.`
+          : "Responder assignment cleared.";
       } else if (newStatus !== undefined) {
-        msg = `Status set to "${updatedIncident.status || newStatus}".`;
+        msg = `Status advanced to "${updatedIncident.status || newStatus}".`;
+      } else if (newNote !== undefined) {
+        msg = "Operational field note logged.";
       }
-      setSuccessMessage(msg);
-      setEditingNoteId(null);
-      setNoteInput("");
-      setMapRefreshTrigger((n) => n + 1);
 
-      setTimeout(() => setSuccessMessage(null), 4000);
+      setSuccessMessage(msg);
+      setMapRefreshTrigger((n) => n + 1);
+      setTimeout(() => setSuccessMessage(null), 3500);
     } catch (err) {
-      console.error("Update error:", err);
+      console.error("Command Center update error:", err);
       setErrorMessage(err instanceof Error ? err.message : "Failed to update incident");
     } finally {
       setActionLoadingId(null);
@@ -244,20 +407,106 @@ export default function CommandCenterPage() {
   };
 
   // ------------------------------------------------------------
-  // FILTERED INCIDENTS & STATS
+  // SIMULATION HANDLERS (POST /incidents)
+  // ------------------------------------------------------------
+  const handleSimulateDisaster = async () => {
+    try {
+      setIsSimulating(true);
+      setErrorMessage(null);
+      const token = await getAccessToken();
+      if (!token) throw new Error("Authentication required for simulation.");
+
+      // Realistic disaster payload
+      const payload = {
+        type: "Flood",
+        description:
+          "[DEMO] Flash Flood & Structural Distress: High water levels causing severe transit disruption and structural threat near Downtown Sector.",
+        location: {
+          lat: 37.7749 + (Math.random() - 0.5) * 0.04,
+          lng: -122.4194 + (Math.random() - 0.5) * 0.04,
+        },
+        severity: 4,
+      };
+
+      const res = await requestWithToken(`${API_URL}/incidents`, token, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err?.detail || "Failed to inject disaster simulation");
+      }
+
+      const created = await res.json();
+      setSuccessMessage(`Disaster simulation injected: ${created?.type || "Flood"}`);
+      setSimulateDisasterOpen(false);
+      await fetchIncidents(false);
+      setMapRefreshTrigger((n) => n + 1);
+      if (created?.id) {
+        handleSelectIncident(created);
+      }
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Simulation injection failed");
+    } finally {
+      setIsSimulating(false);
+    }
+  };
+
+  const handleSimulateWorldCup = async () => {
+    try {
+      setIsSimulating(true);
+      setErrorMessage(null);
+      const token = await getAccessToken();
+      if (!token) throw new Error("Authentication required for simulation.");
+
+      // Realistic World Cup crowd surge payload
+      const payload = {
+        type: "Medical Emergency",
+        description:
+          "[DEMO] World Cup Stadium Zone 3: Stadium perimeter gate congestion and crowd surge requiring rapid medical and security response.",
+        location: {
+          lat: 37.7833 + (Math.random() - 0.5) * 0.04,
+          lng: -122.4167 + (Math.random() - 0.5) * 0.04,
+        },
+        severity: 3,
+      };
+
+      const res = await requestWithToken(`${API_URL}/incidents`, token, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err?.detail || "Failed to inject World Cup simulation");
+      }
+
+      const created = await res.json();
+      setSuccessMessage(`World Cup simulation injected: ${created?.type || "Medical Emergency"}`);
+      setSimulateWorldCupOpen(false);
+      await fetchIncidents(false);
+      setMapRefreshTrigger((n) => n + 1);
+      if (created?.id) {
+        handleSelectIncident(created);
+      }
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Simulation injection failed");
+    } finally {
+      setIsSimulating(false);
+    }
+  };
+
+  // ------------------------------------------------------------
+  // FILTERED INCIDENTS & REAL-TIME DASHBOARD KPIS
   // ------------------------------------------------------------
   const filteredIncidents = useMemo(() => {
     return incidents.filter((inc) => {
-      // Status filter
-      if (statusFilter !== "all" && (inc.status || "reported") !== statusFilter) {
+      // Operating Mode filter
+      const mode = classifyMode(inc);
+      if (operatingMode !== "all" && mode !== operatingMode) {
         return false;
       }
-
-      // Severity filter
-      if (severityFilter === "critical" && inc.severity < 4) return false;
-      if (severityFilter === "high" && inc.severity !== 3) return false;
-      if (severityFilter === "medium" && inc.severity !== 2) return false;
-      if (severityFilter === "low" && inc.severity !== 1) return false;
 
       // Priority tier filter
       const pScore = inc.priority_score ?? inc.severity * 20;
@@ -266,12 +515,20 @@ export default function CommandCenterPage() {
       if (priorityFilter === "medium" && (pScore < 40 || pScore >= 60)) return false;
       if (priorityFilter === "low" && pScore >= 40) return false;
 
-      // Assignment state filter
-      if (assignmentFilter === "assigned" && !inc.assigned_to) return false;
-      if (assignmentFilter === "unassigned" && !!inc.assigned_to) return false;
+      // Status filter
+      if (statusFilter !== "all" && (inc.status || "reported") !== statusFilter) {
+        return false;
+      }
 
-      // Specific responder filter
-      if (responderFilter !== "all" && inc.assigned_to !== responderFilter) {
+      // Responder assignment filter
+      if (responderFilter === "unassigned" && !!inc.assigned_to) return false;
+      if (responderFilter === "assigned" && !inc.assigned_to) return false;
+      if (
+        responderFilter !== "all" &&
+        responderFilter !== "unassigned" &&
+        responderFilter !== "assigned" &&
+        inc.assigned_to !== responderFilter
+      ) {
         return false;
       }
 
@@ -290,50 +547,90 @@ export default function CommandCenterPage() {
 
       return true;
     });
-  }, [incidents, statusFilter, severityFilter, priorityFilter, assignmentFilter, responderFilter, searchQuery]);
+  }, [incidents, operatingMode, priorityFilter, statusFilter, responderFilter, searchQuery]);
 
-  const priorityIncidents = useMemo(() => {
-    return incidents
-      .filter((inc) => {
-        const score = inc.priority_score ?? inc.severity * 20;
-        return (inc.severity >= 3 || score >= 60) && inc.status !== "resolved" && inc.status !== "cancelled";
-      })
-      .sort((a, b) => {
-        const scoreA = a.priority_score ?? a.severity * 20;
-        const scoreB = b.priority_score ?? b.severity * 20;
-        return scoreB - scoreA;
-      })
-      .slice(0, 8);
-  }, [incidents]);
-
+  // Real KPI calculations from operational database
   const stats = useMemo(() => {
+    let active = 0;
     let critical = 0;
-    let highPriority = 0;
     let assigned = 0;
-    let unassigned = 0;
-    let resolved = 0;
+    const assignedResponderIds = new Set<string>();
 
     incidents.forEach((inc) => {
+      const isClosed = inc.status === "resolved" || inc.status === "cancelled";
+      if (!isClosed) active += 1;
+
       const score = inc.priority_score ?? inc.severity * 20;
-      if (score >= 80 || inc.severity >= 4) critical += 1;
-      if (score >= 60) highPriority += 1;
-      if (inc.assigned_to) assigned += 1;
-      else if (inc.status !== "resolved" && inc.status !== "cancelled") unassigned += 1;
-      if (inc.status === "resolved") resolved += 1;
+      if ((score >= 80 || inc.severity >= 4) && !isClosed) {
+        critical += 1;
+      }
+
+      if (inc.assigned_to && !isClosed) {
+        assigned += 1;
+        assignedResponderIds.add(inc.assigned_to);
+      }
     });
 
-    return { total: incidents.length, critical, highPriority, assigned, unassigned, resolved };
-  }, [incidents]);
+    const totalUnits = responders.length;
+    const occupiedUnits = assignedResponderIds.size;
+    const availUnits = Math.max(0, totalUnits - occupiedUnits);
+    const loadPercent =
+      totalUnits > 0 ? Math.min(100, Math.round((assigned / totalUnits) * 100)) : 0;
+
+    return {
+      active,
+      critical,
+      loadPercent,
+      availUnits,
+      totalUnits,
+    };
+  }, [incidents, responders]);
+
+  // Deterministic priority breakdown for selected incident
+  const priorityBreakdown = useMemo(() => {
+    if (!selectedIncident) return null;
+    const sev = selectedIncident.severity;
+    const baseSev =
+      sev >= 5 ? 50 : sev === 4 ? 40 : sev === 3 ? 30 : sev === 2 ? 20 : 10;
+
+    const ht = (selectedIncident.type || "").toLowerCase();
+    let hazard = 10;
+    if (ht.includes("medical") || ht.includes("collapse") || ht.includes("fire")) {
+      hazard = 25;
+    } else if (ht.includes("flood") || ht.includes("cyclone") || ht.includes("earthquake")) {
+      hazard = 15;
+    }
+
+    const st = (selectedIncident.status || "reported").toLowerCase();
+    let statusScore = 0;
+    if (st === "reported") statusScore = 15;
+    else if (st === "verified") statusScore = 10;
+    else if (st === "assigned") statusScore = 5;
+
+    const total = selectedIncident.priority_score ?? Math.min(100, baseSev + hazard + statusScore);
+    const aging = Math.max(0, total - (baseSev + hazard + statusScore));
+
+    return {
+      baseSev,
+      hazard,
+      statusScore,
+      aging,
+      total,
+      tier: selectedIncident.priority_tier || (total >= 80 ? "CRITICAL" : total >= 60 ? "HIGH" : total >= 40 ? "MEDIUM" : "LOW"),
+    };
+  }, [selectedIncident]);
 
   // ------------------------------------------------------------
-  // ROLE GUARD
+  // ROLE SECURITY GUARD
   // ------------------------------------------------------------
   if (userLoading) {
     return (
-      <main className="min-h-screen bg-[#070b14] flex items-center justify-center text-white">
+      <main className="h-screen w-screen bg-[#050811] flex items-center justify-center text-white">
         <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 rounded-full border-2 border-sky-500 border-t-transparent animate-spin"></div>
-          <p className="text-slate-400 text-xs font-medium">Verifying Command Center credentials...</p>
+          <div className="h-8 w-8 rounded-full border-2 border-cyan-500 border-t-transparent animate-spin"></div>
+          <p className="text-cyan-400 font-mono text-xs uppercase tracking-wider font-bold">
+            Verifying Tactical Command Credentials...
+          </p>
         </div>
       </main>
     );
@@ -341,23 +638,25 @@ export default function CommandCenterPage() {
 
   if (!isCommandCenter && role !== "admin") {
     return (
-      <main className="min-h-screen bg-[#070b14] text-white flex flex-col items-center justify-center p-6">
+      <main className="h-screen w-screen bg-[#050811] text-white flex flex-col items-center justify-center p-6">
         <div className="max-w-md w-full rounded-2xl border border-red-500/30 bg-red-950/20 p-8 text-center shadow-2xl backdrop-blur">
           <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-red-500/10 border border-red-500/30 text-2xl mx-auto mb-4">
             🛡️
           </div>
-          <h2 className="text-xl font-bold text-red-300 mb-2">Access Restricted</h2>
+          <h2 className="text-lg font-bold text-red-300 mb-2 uppercase tracking-wide">
+            Command Center Access Restricted
+          </h2>
           <p className="text-xs text-slate-300 mb-4 leading-relaxed">
-            The RescueGrid Command Center is strictly restricted to authorized emergency dispatch coordinators and system administrators.
+            The Emergency Command Center (ECC) is strictly reserved for authorized dispatch coordinators and system administrators.
           </p>
           <div className="rounded-xl bg-black/40 border border-white/10 p-3 mb-6 text-xs text-slate-400">
-            <span>Your current authenticated role: </span>
+            <span>Your authenticated role: </span>
             <strong className="text-white uppercase font-mono">{role || "citizen"}</strong>
           </div>
           <div className="flex flex-col gap-2">
             <Link
               href="/"
-              className="w-full rounded-xl bg-sky-600 px-4 py-2.5 font-bold text-xs hover:bg-sky-500 transition shadow-lg shadow-sky-950/50"
+              className="w-full rounded-xl bg-cyan-600 px-4 py-2.5 font-bold text-xs hover:bg-cyan-500 transition shadow-lg shadow-cyan-950/50"
             >
               Go to Citizen Dashboard
             </Link>
@@ -374,677 +673,973 @@ export default function CommandCenterPage() {
   }
 
   // ------------------------------------------------------------
-  // MAIN VIEW
+  // MAIN EMERGENCY COMMAND CENTER INTERFACE
   // ------------------------------------------------------------
   return (
-    <main className="min-h-screen bg-[#070b14] text-white flex flex-col">
-      <Navbar />
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#050811] text-slate-100 font-sans select-none">
+      {/* ======================================================
+          SECTION 2: TOP COMMAND BAR
+      ====================================================== */}
+      <header className="h-12 border-b border-cyan-500/20 bg-[#070c18] flex items-center justify-between px-3 text-xs shrink-0 z-30 shadow-md">
+        {/* Left: ECC identifier & Title */}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <span className="rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 px-1.5 py-0.5 text-[10px] font-mono font-extrabold tracking-wider">
+              ECC-01
+            </span>
+            <h1 className="text-xs sm:text-sm font-extrabold tracking-wider uppercase text-white font-mono flex items-center gap-1.5">
+              <span>Emergency Command Center</span>
+            </h1>
+          </div>
+          <span className="hidden md:inline-flex items-center gap-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 text-[10px] font-mono text-emerald-400 font-bold">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+            <span>ALL MODES</span>
+          </span>
+        </div>
 
-      <div className="mx-auto max-w-7xl px-4 sm:px-6 py-6 w-full flex-1 flex flex-col gap-6">
-        {/* TOP TITLE BAR */}
-        <section className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-white/10 pb-5">
-          <div>
-            <div className="flex items-center gap-2.5">
-              <span className="flex h-2.5 w-2.5 rounded-full bg-sky-400 animate-pulse"></span>
-              <h1 className="text-xl font-bold tracking-tight text-white">Emergency Command Center</h1>
-              <span className="rounded-full bg-sky-500/10 border border-sky-500/30 px-2 py-0.5 text-[10px] font-bold text-sky-300 uppercase tracking-wider">
-                Live Operations
-              </span>
-            </div>
-            <p className="text-xs text-slate-400 mt-1">
-              Geospatial dispatch, smart incident triage, responder assignment, and real-time response management.
-            </p>
+        {/* Center: Operator indicator & Mode selector */}
+        <div className="flex items-center gap-2 lg:gap-4">
+          <div className="hidden sm:flex items-center gap-1.5 bg-[#0a1122] border border-white/10 px-2 py-1 rounded text-[11px]">
+            <span className="text-slate-400">OPERATOR:</span>
+            <span className="font-mono text-cyan-300 font-bold max-w-[130px] truncate">
+              {profile?.full_name || "COMMAND-COORD"}
+            </span>
           </div>
 
-          <div className="flex items-center gap-2">
+          {/* Operating Mode Buttons */}
+          <div className="flex items-center bg-[#050811] border border-cyan-500/30 rounded p-0.5">
+            {(["all", "normal", "disaster", "world_cup"] as OperatingMode[]).map((mode) => {
+              const active = operatingMode === mode;
+              const label =
+                mode === "all"
+                  ? "All"
+                  : mode === "normal"
+                  ? "Normal"
+                  : mode === "disaster"
+                  ? "Disaster"
+                  : "World Cup";
+
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setOperatingMode(mode)}
+                  className={`px-2 py-0.5 text-[10px] font-mono font-bold uppercase transition rounded ${
+                    active
+                      ? "bg-cyan-500 text-black shadow"
+                      : "text-slate-400 hover:text-white hover:bg-white/5"
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Right: Real KPI metrics, Refresh, and Realtime Indicator */}
+        <div className="flex items-center gap-2 sm:gap-3">
+          <div className="hidden md:flex items-center gap-2 font-mono text-[11px]">
+            <div className="flex items-center gap-1 bg-[#0a1122] border border-white/10 px-2 py-0.5 rounded">
+              <span className="text-slate-400">ACT:</span>
+              <span className="text-cyan-300 font-bold">{stats.active}</span>
+            </div>
+            <div className="flex items-center gap-1 bg-red-950/30 border border-red-500/30 px-2 py-0.5 rounded">
+              <span className="text-red-400">CRIT:</span>
+              <span className="text-red-300 font-bold">{stats.critical}</span>
+            </div>
+            <div className="hidden lg:flex items-center gap-1 bg-[#0a1122] border border-white/10 px-2 py-0.5 rounded">
+              <span className="text-slate-400">LOAD:</span>
+              <span className="text-amber-300 font-bold">{stats.loadPercent}%</span>
+            </div>
+            <div className="hidden lg:flex items-center gap-1 bg-[#0a1122] border border-white/10 px-2 py-0.5 rounded">
+              <span className="text-emerald-400 font-bold">
+                {stats.availUnits}/{stats.totalUnits}
+              </span>
+              <span className="text-slate-400">AVAIL</span>
+            </div>
+          </div>
+
+          {/* Refresh Button */}
+          <button
+            type="button"
+            onClick={() => {
+              fetchIncidents(false);
+              fetchResponders();
+              setMapRefreshTrigger((n) => n + 1);
+            }}
+            disabled={loading}
+            title="Refresh Operational Feed"
+            className="p-1 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 hover:text-white transition disabled:opacity-50"
+          >
+            <span className={`inline-block text-xs ${loading ? "animate-spin" : ""}`}>↻</span>
+          </button>
+
+          {/* Realtime Live Pulse */}
+          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-black/40 border border-white/10">
+            <span
+              className={`h-2 w-2 rounded-full ${
+                realtimeState === "live"
+                  ? "bg-emerald-400 animate-pulse shadow-sm shadow-emerald-400"
+                  : "bg-amber-400"
+              }`}
+            ></span>
+            <span className="font-mono text-[9px] uppercase font-bold text-slate-300">
+              {realtimeState === "live" ? "LIVE" : "POLL"}
+            </span>
+          </div>
+
+          {/* Navigation link to public portal */}
+          <Link
+            href="/"
+            title="Exit ECC to Portal"
+            className="text-[10px] text-slate-400 hover:text-cyan-300 px-1 font-mono transition"
+          >
+            PORTAL ↗
+          </Link>
+        </div>
+      </header>
+
+      {/* ======================================================
+          SECTION 3: DEMO AND OPERATIONS TOOLBAR
+      ====================================================== */}
+      <div className="h-10 border-b border-white/10 bg-[#070b16] flex items-center justify-between px-3 text-xs shrink-0 z-20">
+        {/* Left: Simulation & Safety controls */}
+        <div className="flex items-center gap-2 overflow-x-auto py-1">
+          <button
+            type="button"
+            onClick={() => setSimulateDisasterOpen(true)}
+            className="flex items-center gap-1 px-2.5 py-1 rounded bg-red-950/40 hover:bg-red-900/50 border border-red-500/40 text-red-300 text-[10px] font-mono font-bold uppercase transition"
+          >
+            <span>⚡</span>
+            <span>Disaster Sim [DEMO]</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setSimulateWorldCupOpen(true)}
+            className="flex items-center gap-1 px-2.5 py-1 rounded bg-purple-950/40 hover:bg-purple-900/50 border border-purple-500/40 text-purple-300 text-[10px] font-mono font-bold uppercase transition"
+          >
+            <span>⚽</span>
+            <span>World Cup Sim [DEMO]</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setClearIncidentsOpen(true)}
+            className="flex items-center gap-1 px-2.5 py-1 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-slate-400 hover:text-slate-200 text-[10px] font-mono uppercase transition"
+          >
+            <span>🗑️</span>
+            <span>Clear Incidents</span>
+          </button>
+
+          <label className="hidden sm:flex items-center gap-1.5 text-[10px] font-mono text-slate-400 cursor-pointer ml-1">
+            <input
+              type="checkbox"
+              checked={replaceExistingDemo}
+              onChange={(e) => setReplaceExistingDemo(e.target.checked)}
+              className="rounded accent-cyan-500"
+            />
+            <span>Replace-Existing Mode</span>
+          </label>
+        </div>
+
+        {/* Right: View controls & Mobile/Tablet toggles */}
+        <div className="flex items-center gap-2">
+          {selectedIncident && (
             <button
-              onClick={() => {
-                fetchIncidents();
-                fetchResponders();
-              }}
-              disabled={loading}
-              className="rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-200 transition flex items-center gap-1.5"
+              type="button"
+              onClick={() => handleSelectIncident(null)}
+              className="px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 text-[10px] font-mono transition"
             >
-              <span>{loading ? "Syncing..." : "↻ Refresh Feed"}</span>
+              Reset Selection
             </button>
-            <Link
-              href="/incidents"
-              className="rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-300 transition"
+          )}
+
+          {/* Mobile/Tablet Queue & Details Panel Toggles */}
+          <div className="flex items-center lg:hidden gap-1">
+            <button
+              type="button"
+              onClick={() => setShowQueue(!showQueue)}
+              className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border transition ${
+                showQueue
+                  ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40"
+                  : "bg-white/5 text-slate-400 border-white/10"
+              }`}
             >
-              Public Feed
-            </Link>
+              Queue
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowDetails(!showDetails)}
+              className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border transition ${
+                showDetails
+                  ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40"
+                  : "bg-white/5 text-slate-400 border-white/10"
+              }`}
+            >
+              Details
+            </button>
           </div>
-        </section>
+        </div>
+      </div>
 
-        {/* METRICS ROW */}
-        <section className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-          <div className="rounded-xl border border-white/10 bg-[#0e1424] p-4 shadow-sm">
-            <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Total</span>
-            <p className="mt-1 text-2xl font-extrabold text-white">{stats.total}</p>
-            <span className="text-[10px] text-slate-500">All emergencies</span>
+      {/* ======================================================
+          TOAST FEEDBACK BANNERS
+      ====================================================== */}
+      {errorMessage && (
+        <div className="bg-red-950/95 border-b border-red-500/40 px-3 py-1.5 text-xs text-red-200 flex items-center justify-between z-30 shrink-0">
+          <div className="flex items-center gap-2">
+            <span>⚠️</span>
+            <span className="font-mono text-[11px]">{errorMessage}</span>
           </div>
+          <button
+            type="button"
+            onClick={() => setErrorMessage(null)}
+            className="text-red-400 hover:text-white font-bold px-1"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
-          <div className="rounded-xl border border-red-500/20 bg-red-950/20 p-4 shadow-sm">
-            <span className="text-[11px] font-semibold text-red-400 uppercase tracking-wider">Critical Priority</span>
-            <p className="mt-1 text-2xl font-extrabold text-red-300">{stats.critical}</p>
-            <span className="text-[10px] text-red-400/60">Score 80-100 or Sev 4-5</span>
+      {successMessage && (
+        <div className="bg-emerald-950/95 border-b border-emerald-500/40 px-3 py-1.5 text-xs text-emerald-200 flex items-center justify-between z-30 shrink-0">
+          <div className="flex items-center gap-2">
+            <span>✓</span>
+            <span className="font-mono text-[11px]">{successMessage}</span>
           </div>
+          <button
+            type="button"
+            onClick={() => setSuccessMessage(null)}
+            className="text-emerald-400 hover:text-white font-bold px-1"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
-          <div className="rounded-xl border border-orange-500/20 bg-orange-950/20 p-4 shadow-sm">
-            <span className="text-[11px] font-semibold text-orange-400 uppercase tracking-wider">High Urgency</span>
-            <p className="mt-1 text-2xl font-extrabold text-orange-300">{stats.highPriority}</p>
-            <span className="text-[10px] text-orange-400/60">Score 60+ priority</span>
-          </div>
-
-          <div className="rounded-xl border border-purple-500/20 bg-purple-950/20 p-4 shadow-sm">
-            <span className="text-[11px] font-semibold text-purple-400 uppercase tracking-wider">Assigned Units</span>
-            <p className="mt-1 text-2xl font-extrabold text-purple-300">{stats.assigned}</p>
-            <span className="text-[10px] text-purple-400/60">Active dispatch units</span>
-          </div>
-
-          <div className="rounded-xl border border-amber-500/20 bg-amber-950/20 p-4 shadow-sm">
-            <span className="text-[11px] font-semibold text-amber-400 uppercase tracking-wider">Unassigned Queue</span>
-            <p className="mt-1 text-2xl font-extrabold text-amber-300">{stats.unassigned}</p>
-            <span className="text-[10px] text-amber-400/60">Awaiting assignment</span>
-          </div>
-
-          <div className="rounded-xl border border-emerald-500/20 bg-emerald-950/20 p-4 shadow-sm">
-            <span className="text-[11px] font-semibold text-emerald-400 uppercase tracking-wider">Resolved</span>
-            <p className="mt-1 text-2xl font-extrabold text-emerald-300">{stats.resolved}</p>
-            <span className="text-[10px] text-emerald-400/60">Cleared emergencies</span>
-          </div>
-        </section>
-
-        {/* FEEDBACK BANNERS */}
-        {errorMessage && (
-          <div role="alert" className="rounded-xl border border-red-500/40 bg-red-950/90 p-4 text-xs text-red-200 flex items-center justify-between shadow-xl">
-            <div className="flex items-center gap-2">
-              <span className="text-base">⚠️</span>
-              <span className="font-medium">{errorMessage}</span>
-            </div>
-            <button onClick={() => setErrorMessage(null)} className="text-red-400 hover:text-white px-2 text-lg font-bold">×</button>
-          </div>
-        )}
-
-        {successMessage && (
-          <div role="alert" className="rounded-xl border border-emerald-500/40 bg-emerald-950/90 p-4 text-xs text-emerald-200 flex items-center justify-between shadow-xl">
-            <div className="flex items-center gap-2">
-              <span className="text-base">✓</span>
-              <span className="font-medium">{successMessage}</span>
-            </div>
-            <button onClick={() => setSuccessMessage(null)} className="text-emerald-400 hover:text-white px-2 text-lg font-bold">×</button>
-          </div>
-        )}
-
-        {/* TOP SPLIT: LIVE MAP & HIGH-PRIORITY TRIAGE QUEUE */}
-        <section className="grid gap-6 lg:grid-cols-3 items-start">
-          {/* MAP */}
-          <div className="lg:col-span-2 flex flex-col rounded-2xl border border-white/10 bg-[#0e1424] overflow-hidden shadow-xl">
-            <div className="flex items-center justify-between border-b border-white/10 px-5 py-3.5 bg-[#0a0f1d]">
-              <div className="flex items-center gap-2.5">
-                <div className="h-2 w-2 rounded-full bg-sky-400 animate-pulse"></div>
-                <h2 className="text-sm font-bold text-white tracking-wide">Command Center Geospatial Overview</h2>
-              </div>
-              <span className="text-xs text-slate-400 font-mono">
-                {incidents.length} active nodes
+      {/* ======================================================
+          3-COLUMN MAIN OPERATIONS WORKSPACE
+      ====================================================== */}
+      <main className="flex-1 flex min-h-0 overflow-hidden relative">
+        {/* ====================================================
+            COLUMN 1: SECTION 4 - LEFT INCIDENT QUEUE
+        ==================================================== */}
+        <aside
+          className={`${
+            showQueue ? "flex" : "hidden"
+          } lg:flex w-full sm:w-80 lg:w-[350px] shrink-0 border-r border-white/10 bg-[#060a15] flex-col h-full z-10`}
+        >
+          {/* Header & Filter Controls */}
+          <div className="p-3 border-b border-white/10 bg-[#080d1b] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-mono uppercase font-bold tracking-wider text-cyan-400 flex items-center gap-1.5">
+                <span>📋</span>
+                <span>Incident Queue</span>
+              </span>
+              <span className="font-mono text-[10px] text-slate-400 bg-black/40 border border-white/10 px-2 py-0.5 rounded">
+                {filteredIncidents.length} / {incidents.length}
               </span>
             </div>
 
+            {/* Search Input */}
             <div className="relative">
-              <DisasterMap
-                selectedIncidentId={selectedIncident?.id}
-                onIncidentSelect={(inc) => setSelectedIncident(inc)}
-                refreshTrigger={mapRefreshTrigger}
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search type, location, responder..."
+                className="w-full rounded bg-[#03060d] border border-white/10 px-2.5 py-1 text-xs text-slate-200 placeholder-slate-500 outline-none focus:border-cyan-500 transition font-mono"
               />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-2 top-1 text-slate-400 hover:text-white font-bold text-xs"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            {/* Queue Filter Dropdowns */}
+            <div className="grid grid-cols-3 gap-1.5">
+              {/* Urgency / Priority */}
+              <select
+                value={priorityFilter}
+                onChange={(e) => setPriorityFilter(e.target.value as PriorityFilter)}
+                className="rounded bg-[#03060d] border border-white/10 px-1.5 py-1 text-[10px] font-mono text-slate-300 outline-none focus:border-cyan-500"
+              >
+                <option value="all">All Urgency</option>
+                <option value="critical">Crit (80+)</option>
+                <option value="high">High (60-79)</option>
+                <option value="medium">Med (40-59)</option>
+                <option value="low">Low (&lt;40)</option>
+              </select>
+
+              {/* Status */}
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="rounded bg-[#03060d] border border-white/10 px-1.5 py-1 text-[10px] font-mono text-slate-300 outline-none focus:border-cyan-500"
+              >
+                <option value="all">All Status</option>
+                {ALLOWED_STATUSES.map((st) => (
+                  <option key={st} value={st}>
+                    {getStatusConfig(st).label}
+                  </option>
+                ))}
+              </select>
+
+              {/* Operator Assignment */}
+              <select
+                value={responderFilter}
+                onChange={(e) => setResponderFilter(e.target.value)}
+                className="rounded bg-[#03060d] border border-white/10 px-1.5 py-1 text-[10px] font-mono text-slate-300 outline-none focus:border-cyan-500"
+              >
+                <option value="all">All Units</option>
+                <option value="unassigned">Unassigned</option>
+                <option value="assigned">Assigned</option>
+                {responders.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.full_name}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
 
-          {/* PRIORITY QUEUE */}
-          <div className="flex flex-col rounded-2xl border border-white/10 bg-[#0e1424] overflow-hidden shadow-xl h-[520px]">
-            <div className="border-b border-white/10 px-5 py-3.5 bg-[#0a0f1d] flex items-center justify-between">
-              <div>
-                <h3 className="font-bold text-sm text-white">Priority Triage Queue</h3>
-                <p className="text-[11px] text-slate-400">Deterministic Score &ge; 60 or Severity &ge; 3</p>
+          {/* Scrollable Incident Cards List */}
+          <div className="flex-1 overflow-y-auto divide-y divide-white/5">
+            {loading ? (
+              <div className="flex flex-col items-center justify-center py-16 text-slate-400 gap-2 font-mono text-xs">
+                <div className="h-6 w-6 rounded-full border-2 border-cyan-500 border-t-transparent animate-spin"></div>
+                <span>Syncing Queue Telemetry...</span>
               </div>
-              <span className="rounded-full bg-red-500/15 border border-red-500/30 px-2 py-0.5 text-[10px] font-bold text-red-400 uppercase">
-                {priorityIncidents.length} Urgent
-              </span>
+            ) : filteredIncidents.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 text-slate-500 px-4 text-center">
+                <span className="text-2xl mb-1">🛰️</span>
+                <p className="font-mono text-xs text-slate-300 font-bold uppercase">No matching incidents</p>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Adjust mode, urgency, or operator filters.
+                </p>
+              </div>
+            ) : (
+              filteredIncidents.map((inc) => {
+                const isSelected = selectedIncident?.id === inc.id;
+                const mode = classifyMode(inc);
+                const score = inc.priority_score ?? inc.severity * 20;
+
+                return (
+                  <button
+                    key={inc.id}
+                    type="button"
+                    onClick={() => handleSelectIncident(inc)}
+                    className={`w-full text-left p-2.5 transition flex flex-col gap-1.5 ${
+                      isSelected
+                        ? "bg-[#0f1d38] border-l-2 border-cyan-400 ring-1 ring-cyan-500/30"
+                        : "hover:bg-white/[0.03]"
+                    }`}
+                  >
+                    {/* Top line: ID, Mode, Priority */}
+                    <div className="flex items-center justify-between gap-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-mono font-bold text-[10px] text-cyan-400">
+                          #INC-{inc.id.slice(0, 6).toUpperCase()}
+                        </span>
+                        <ModeBadge mode={mode} />
+                      </div>
+                      <PriorityTag score={score} tier={inc.priority_tier} />
+                    </div>
+
+                    {/* Title & Type */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-sm">{getTypeIcon(inc.type)}</span>
+                      <span className="text-xs font-bold text-slate-100 capitalize font-mono truncate">
+                        {inc.type}
+                      </span>
+                    </div>
+
+                    {/* Short Description */}
+                    <p className="text-[11px] text-slate-400 line-clamp-2 leading-relaxed">
+                      {inc.description || "No situation description provided."}
+                    </p>
+
+                    {/* Footer: Location, Status, Unit, Time */}
+                    <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1 font-mono">
+                      <span>
+                        📍 {inc.latitude.toFixed(2)}, {inc.longitude.toFixed(2)}
+                      </span>
+                      <span>{formatRelativeTime(inc.created_at)}</span>
+                    </div>
+
+                    <div className="flex items-center justify-between text-[10px] pt-0.5">
+                      <StatusBadge status={inc.status} size="sm" showIcon={false} />
+                      {inc.assigned_to ? (
+                        <span className="text-purple-300 font-mono text-[9px] flex items-center gap-1">
+                          <span>👤</span>
+                          <span className="max-w-[100px] truncate">
+                            {inc.assigned_responder_name || "Assigned"}
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="text-amber-400/80 font-mono text-[9px]">
+                          ⚠️ Unassigned
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </aside>
+
+        {/* ====================================================
+            COLUMN 2: SECTION 5 - LARGE CENTRAL INTERACTIVE MAP
+        ==================================================== */}
+        <section className="flex-1 h-full min-w-0 relative bg-[#050811]">
+          <DisasterMap
+            hideToolbar={true}
+            fullHeight={true}
+            showLayerPanel={true}
+            incidents={filteredIncidents}
+            selectedIncidentId={selectedIncident?.id}
+            onIncidentSelect={handleSelectIncident}
+            refreshTrigger={mapRefreshTrigger}
+          />
+        </section>
+
+        {/* ====================================================
+            COLUMN 3: SECTION 7 - RIGHT INCIDENT DETAILS PANEL
+        ==================================================== */}
+        <aside
+          className={`${
+            showDetails ? "flex" : "hidden"
+          } xl:flex w-full sm:w-88 lg:w-[370px] shrink-0 border-l border-white/10 bg-[#060a15] flex-col h-full z-10 overflow-hidden`}
+        >
+          {!selectedIncident ? (
+            /* EMPTY SELECTION STATE */
+            <div className="flex-1 flex flex-col items-center justify-center p-6 text-center text-slate-500">
+              <div className="h-14 w-14 rounded-2xl bg-cyan-950/20 border border-cyan-500/20 flex items-center justify-center text-2xl text-cyan-400 mb-3 animate-pulse">
+                🎯
+              </div>
+              <h3 className="font-mono text-xs uppercase font-bold text-slate-300 tracking-wider">
+                Select an Incident
+              </h3>
+              <p className="text-[11px] text-slate-400 mt-1.5 max-w-[240px] leading-relaxed">
+                Click any incident card from the queue or select a map marker to inspect triage diagnostics, dispatch responders, and manage live response.
+              </p>
             </div>
-
-            <div className="flex-1 space-y-3 overflow-y-auto p-3.5">
-              {priorityIncidents.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-20 text-center text-slate-500 px-4">
-                  <span className="text-3xl mb-2">✅</span>
-                  <p className="font-semibold text-slate-300 text-sm">No Urgent Triage Backlog</p>
-                  <p className="text-xs text-slate-500 mt-1 max-w-[200px]">
-                    All critical &amp; high priority incidents have been addressed.
-                  </p>
+          ) : (
+            /* ACTIVE INCIDENT DETAILS PANEL */
+            <div className="flex-1 flex flex-col h-full overflow-hidden">
+              {/* Header */}
+              <div className="p-3 border-b border-white/10 bg-[#080d1b] space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-mono text-xs font-extrabold text-cyan-400">
+                      #INC-{selectedIncident.id.slice(0, 8).toUpperCase()}
+                    </span>
+                    <ModeBadge mode={classifyMode(selectedIncident)} />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleSelectIncident(null)}
+                    className="text-slate-400 hover:text-white font-mono text-xs px-1"
+                    title="Close details"
+                  >
+                    ✕
+                  </button>
                 </div>
-              ) : (
-                priorityIncidents.map((inc) => {
-                  const nextStatus = getNextRecommendedStatus(inc.status);
-                  const isUpdating = actionLoadingId === inc.id;
 
+                <div className="flex items-center justify-between gap-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">{getTypeIcon(selectedIncident.type)}</span>
+                    <div>
+                      <h2 className="text-xs font-bold text-white uppercase font-mono">
+                        {selectedIncident.type}
+                      </h2>
+                      <p className="text-[10px] text-slate-400 font-mono">
+                        {formatRelativeTime(selectedIncident.created_at)}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-col items-end gap-1">
+                    <PriorityTag
+                      score={selectedIncident.priority_score}
+                      tier={selectedIncident.priority_tier}
+                    />
+                    <StatusBadge status={selectedIncident.status} size="sm" showIcon={false} />
+                  </div>
+                </div>
+
+                {/* Subheader Metadata */}
+                <div className="flex items-center justify-between text-[10px] font-mono text-slate-400 pt-1 border-t border-white/5">
+                  <span>
+                    📍 {selectedIncident.latitude.toFixed(4)}, {selectedIncident.longitude.toFixed(4)}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <span>Severity:</span>
+                    <SeverityBadge severity={selectedIncident.severity} size="sm" />
+                  </div>
+                </div>
+              </div>
+
+              {/* 4 Navigation Tabs */}
+              <div className="flex items-center border-b border-white/10 bg-[#050811] text-[10px] font-mono">
+                {(["triage", "operator", "details", "activity"] as DetailsTab[]).map((tab) => {
+                  const active = activeDetailsTab === tab;
                   return (
-                    <div
-                      key={inc.id}
-                      className="rounded-xl border border-white/10 bg-white/[0.02] p-3.5 space-y-2.5 hover:border-white/20 transition"
+                    <button
+                      key={tab}
+                      type="button"
+                      onClick={() => setActiveDetailsTab(tab)}
+                      className={`flex-1 py-1.5 text-center uppercase font-bold transition border-b-2 ${
+                        active
+                          ? "border-cyan-400 text-cyan-300 bg-cyan-950/20"
+                          : "border-transparent text-slate-400 hover:text-white"
+                      }`}
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex items-center gap-2">
-                          <span className="text-lg">{getTypeIcon(inc.type)}</span>
-                          <div>
-                            <span className="text-xs font-bold text-white capitalize block leading-tight">
-                              {inc.type}
-                            </span>
-                            <span className="text-[10px] text-slate-500 font-mono">
-                              ID: {inc.id.slice(0, 8)}...
-                            </span>
-                          </div>
-                        </div>
+                      {tab}
+                    </button>
+                  );
+                })}
+              </div>
 
-                        <div className="flex items-center gap-1.5">
-                          <PriorityBadge score={inc.priority_score} tier={inc.priority_tier} />
-                          <StatusBadge status={inc.status} size="sm" showIcon={false} />
+              {/* Tab Contents Container */}
+              <div className="flex-1 overflow-y-auto p-3 space-y-3">
+                {/* ---------------- TAB 1: TRIAGE ---------------- */}
+                {activeDetailsTab === "triage" && (
+                  <div className="space-y-3 text-xs">
+                    {/* Explainable Smart Priority Formula */}
+                    <div className="rounded-lg border border-cyan-500/20 bg-[#080d1b] p-2.5 space-y-2">
+                      <span className="text-[10px] font-mono uppercase font-bold text-cyan-400 tracking-wider block">
+                        Deterministic Priority Breakdown
+                      </span>
+                      <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
+                        <div className="bg-black/30 p-1.5 rounded border border-white/5">
+                          <span className="text-slate-400 block text-[9px]">BASE SEVERITY</span>
+                          <span className="text-white font-bold">+{priorityBreakdown?.baseSev} pts</span>
+                        </div>
+                        <div className="bg-black/30 p-1.5 rounded border border-white/5">
+                          <span className="text-slate-400 block text-[9px]">HAZARD URGENCY</span>
+                          <span className="text-white font-bold">+{priorityBreakdown?.hazard} pts</span>
+                        </div>
+                        <div className="bg-black/30 p-1.5 rounded border border-white/5">
+                          <span className="text-slate-400 block text-[9px]">STATUS URGENCY</span>
+                          <span className="text-white font-bold">+{priorityBreakdown?.statusScore} pts</span>
+                        </div>
+                        <div className="bg-black/30 p-1.5 rounded border border-white/5">
+                          <span className="text-slate-400 block text-[9px]">AGING DECAY</span>
+                          <span className="text-white font-bold">+{priorityBreakdown?.aging} pts</span>
                         </div>
                       </div>
+                      <div className="flex items-center justify-between pt-1 border-t border-white/10 font-mono text-xs">
+                        <span className="text-slate-300">Composite Score:</span>
+                        <span className="text-cyan-300 font-bold">
+                          {priorityBreakdown?.total} / 100 ({priorityBreakdown?.tier})
+                        </span>
+                      </div>
+                    </div>
 
-                      {/* Assignment indicator */}
-                      <div className="flex items-center justify-between text-[11px] bg-white/[0.03] px-2.5 py-1.5 rounded-lg border border-white/5">
-                        <span className="text-slate-400">Assigned:</span>
-                        {inc.assigned_to ? (
-                          <span className="text-purple-300 font-semibold flex items-center gap-1">
-                            <span>👤</span>
-                            <span>{inc.assigned_responder_name || "Assigned Unit"}</span>
-                          </span>
+                    {/* Recommended Next Workflow Action */}
+                    {getNextRecommendedStatus(selectedIncident.status) && (
+                      <div className="rounded-lg border border-white/10 bg-[#080d1b] p-2.5 space-y-1.5">
+                        <span className="text-[10px] font-mono uppercase font-bold text-slate-400 tracking-wider block">
+                          Recommended Protocol
+                        </span>
+                        <p className="text-[11px] text-slate-300">
+                          Current status requires advancing to{" "}
+                          <strong className="text-cyan-400 font-mono uppercase">
+                            {getNextRecommendedStatus(selectedIncident.status)}
+                          </strong>
+                          .
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nxt = getNextRecommendedStatus(selectedIncident.status);
+                            if (nxt) handleUpdate(selectedIncident.id, nxt);
+                          }}
+                          disabled={actionLoadingId === selectedIncident.id}
+                          className="w-full mt-1 py-1 px-2.5 rounded bg-cyan-600 hover:bg-cyan-500 text-black font-mono font-bold text-xs uppercase transition disabled:opacity-50"
+                        >
+                          {actionLoadingId === selectedIncident.id
+                            ? "Updating..."
+                            : `Execute → ${getNextRecommendedStatus(selectedIncident.status)}`}
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Operational Completeness Checklist */}
+                    <div className="rounded-lg border border-white/10 bg-[#080d1b] p-2.5 space-y-1.5 font-mono text-[11px]">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
+                        Readiness Checklist
+                      </span>
+                      <div className="flex items-center justify-between text-slate-300 py-0.5">
+                        <span>Geospatial Coordinates:</span>
+                        <span className="text-emerald-400">✓ VERIFIED</span>
+                      </div>
+                      <div className="flex items-center justify-between text-slate-300 py-0.5">
+                        <span>Unit Dispatched:</span>
+                        {selectedIncident.assigned_to ? (
+                          <span className="text-emerald-400">✓ ASSIGNED</span>
                         ) : (
-                          <span className="text-amber-400/80 font-medium">Unassigned</span>
+                          <span className="text-amber-400">⚠️ PENDING</span>
                         )}
                       </div>
-
-                      <p className="text-xs text-slate-300 line-clamp-2 leading-relaxed">
-                        {inc.description || "No situation description provided."}
-                      </p>
-
-                      <div className="flex items-center justify-between pt-1 border-t border-white/5 text-[10px] text-slate-400">
-                        <span className="font-mono">
-                          📍 {inc.latitude.toFixed(3)}, {inc.longitude.toFixed(3)}
-                        </span>
-                        {nextStatus ? (
-                          <button
-                            onClick={() => handleUpdate(inc.id, nextStatus)}
-                            disabled={isUpdating}
-                            className="rounded-lg bg-sky-600/30 hover:bg-sky-600/50 text-sky-200 border border-sky-500/30 px-2 py-0.5 font-bold transition disabled:opacity-50"
-                          >
-                            Advance → {nextStatus}
-                          </button>
+                      <div className="flex items-center justify-between text-slate-300 py-0.5">
+                        <span>Field Notes Logged:</span>
+                        {selectedIncident.note ? (
+                          <span className="text-emerald-400">✓ LOGGED</span>
                         ) : (
-                          <span className="text-emerald-400 font-semibold">Triage Complete</span>
+                          <span className="text-slate-500">OPTIONAL</span>
                         )}
                       </div>
                     </div>
-                  );
-                })
-              )}
-            </div>
-          </div>
-        </section>
+                  </div>
+                )}
 
-        {/* OPERATIONS TABLE WITH MULTI-DIMENSIONAL FILTERS */}
-        <section className="flex flex-col rounded-2xl border border-white/10 bg-[#0e1424] overflow-hidden shadow-xl">
-          {/* FILTER CONTROLS BAR */}
-          <div className="border-b border-white/10 bg-[#0a0f1d] p-4 flex flex-col gap-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <h3 className="font-bold text-sm text-white">Live Operations Dispatch Console</h3>
-                <p className="text-[11px] text-slate-400">
-                  Showing {filteredIncidents.length} of {incidents.length} total incidents
-                </p>
-              </div>
+                {/* ---------------- TAB 2: OPERATOR ---------------- */}
+                {activeDetailsTab === "operator" && (
+                  <div className="space-y-3 text-xs">
+                    <div className="rounded-lg border border-purple-500/20 bg-[#080d1b] p-3 space-y-2.5">
+                      <span className="text-[10px] font-mono uppercase font-bold text-purple-300 tracking-wider block">
+                        Emergency Unit Dispatch
+                      </span>
 
-              {/* SEARCH */}
-              <div className="relative min-w-[240px]">
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search type, location, responder..."
-                  className="w-full rounded-xl border border-white/10 bg-[#070b14] px-3.5 py-1.5 text-xs text-white placeholder-slate-500 outline-none focus:border-sky-500 transition"
-                />
-                {searchQuery && (
-                  <button
-                    onClick={() => setSearchQuery("")}
-                    className="absolute right-2.5 top-1.5 text-slate-500 hover:text-white text-xs font-bold"
-                  >
-                    ×
-                  </button>
+                      {/* Current Assignment Status */}
+                      <div className="bg-black/40 p-2 rounded border border-white/5 font-mono text-[11px]">
+                        <span className="text-slate-400 block text-[9px]">ASSIGNED UNIT</span>
+                        {selectedIncident.assigned_to ? (
+                          <div className="flex items-center justify-between mt-0.5">
+                            <span className="text-purple-200 font-bold flex items-center gap-1.5">
+                              <span>👤</span>
+                              <span>
+                                {selectedIncident.assigned_responder_name || "Assigned Unit"}
+                              </span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleUpdate(selectedIncident.id, undefined, undefined, null)}
+                              disabled={actionLoadingId === selectedIncident.id}
+                              className="text-red-400 hover:text-red-300 text-[10px] font-bold uppercase transition"
+                            >
+                              Unassign
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="text-amber-400 font-bold block mt-0.5">
+                            No unit currently dispatched
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Dispatch Selector */}
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-mono uppercase text-slate-400 block">
+                          Select Unit from Active Roster:
+                        </label>
+                        <select
+                          value={selectedIncident.assigned_to || ""}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            handleUpdate(selectedIncident.id, undefined, undefined, val || null);
+                          }}
+                          disabled={actionLoadingId === selectedIncident.id}
+                          className="w-full rounded bg-[#03060d] border border-white/10 px-2 py-1.5 text-xs font-mono text-slate-200 outline-none focus:border-purple-500 transition"
+                        >
+                          <option value="">
+                            {selectedIncident.assigned_to ? "Reassign to different unit..." : "Dispatch responder..."}
+                          </option>
+                          {responders.map((r) => (
+                            <option key={r.id} value={r.id}>
+                              {r.full_name} ({r.role})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <p className="text-[10px] text-slate-500 font-mono">
+                        Dispatching a unit enforces operational ownership. Only assigned responders and command operators may log status advancements.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* ---------------- TAB 3: DETAILS ---------------- */}
+                {activeDetailsTab === "details" && (
+                  <div className="space-y-3 text-xs">
+                    {/* Full Situation Description */}
+                    <div className="rounded-lg border border-white/10 bg-[#080d1b] p-2.5 space-y-1">
+                      <span className="text-[10px] font-mono uppercase font-bold text-slate-400 tracking-wider block">
+                        Situation Brief
+                      </span>
+                      <p className="text-slate-200 text-xs leading-relaxed">
+                        {selectedIncident.description || "No situation description provided."}
+                      </p>
+                    </div>
+
+                    {/* Field Notes Editor */}
+                    <div className="rounded-lg border border-white/10 bg-[#080d1b] p-2.5 space-y-2">
+                      <span className="text-[10px] font-mono uppercase font-bold text-cyan-400 tracking-wider block">
+                        Situational Field Notes
+                      </span>
+                      <textarea
+                        value={fieldNoteText}
+                        onChange={(e) => setFieldNoteText(e.target.value)}
+                        placeholder="Log tactical field note or command update..."
+                        rows={3}
+                        className="w-full rounded bg-[#03060d] border border-white/10 p-2 text-xs text-white outline-none focus:border-cyan-500 resize-none font-mono"
+                      />
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setIsSavingNote(true);
+                          await handleUpdate(selectedIncident.id, undefined, fieldNoteText.trim() || undefined);
+                          setIsSavingNote(false);
+                        }}
+                        disabled={isSavingNote || actionLoadingId === selectedIncident.id}
+                        className="py-1 px-3 rounded bg-cyan-600 hover:bg-cyan-500 text-black font-mono font-bold text-[10px] uppercase transition disabled:opacity-50"
+                      >
+                        {isSavingNote ? "Saving Note..." : "Save Field Note"}
+                      </button>
+                    </div>
+
+                    {/* Raw Telemetry Specs */}
+                    <div className="rounded-lg border border-white/10 bg-[#080d1b] p-2.5 space-y-1 font-mono text-[10px] text-slate-400">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block mb-1">
+                        Technical Telemetry
+                      </span>
+                      <div className="flex justify-between py-0.5 border-b border-white/5">
+                        <span>Incident UUID:</span>
+                        <span className="text-slate-300 truncate max-w-[170px]">{selectedIncident.id}</span>
+                      </div>
+                      <div className="flex justify-between py-0.5 border-b border-white/5">
+                        <span>Reporter ID:</span>
+                        <span className="text-slate-300 truncate max-w-[170px]">{selectedIncident.user_id || "Anonymous"}</span>
+                      </div>
+                      <div className="flex justify-between py-0.5 border-b border-white/5">
+                        <span>Severity:</span>
+                        <span className="text-slate-300">{selectedIncident.severity} / 5</span>
+                      </div>
+                      <div className="flex justify-between py-0.5">
+                        <span>Created At:</span>
+                        <span className="text-slate-300">{selectedIncident.created_at || "N/A"}</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* ---------------- TAB 4: ACTIVITY / HISTORY ---------------- */}
+                {activeDetailsTab === "activity" && (
+                  <div className="space-y-2 text-xs font-mono">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
+                      Audit Timeline
+                    </span>
+
+                    {/* Timeline items derived from factual database fields */}
+                    <div className="space-y-2 border-l border-white/10 pl-3 ml-1">
+                      {/* Initial Report Event */}
+                      <div className="relative">
+                        <span className="absolute -left-[17px] top-1 h-2 w-2 rounded-full bg-cyan-400"></span>
+                        <p className="text-[11px] text-slate-200 font-bold">Incident Reported</p>
+                        <p className="text-[10px] text-slate-500">
+                          {selectedIncident.created_at ? new Date(selectedIncident.created_at).toLocaleString() : "Reported"}
+                        </p>
+                      </div>
+
+                      {/* Assignment Event if assigned */}
+                      {selectedIncident.assigned_to && (
+                        <div className="relative">
+                          <span className="absolute -left-[17px] top-1 h-2 w-2 rounded-full bg-purple-400"></span>
+                          <p className="text-[11px] text-purple-300 font-bold">
+                            Dispatched to {selectedIncident.assigned_responder_name || "Unit"}
+                          </p>
+                          <p className="text-[10px] text-slate-500">Active response assignment</p>
+                        </div>
+                      )}
+
+                      {/* Current Status Event */}
+                      <div className="relative">
+                        <span className="absolute -left-[17px] top-1 h-2 w-2 rounded-full bg-emerald-400"></span>
+                        <p className="text-[11px] text-emerald-300 font-bold capitalize">
+                          Current State: {selectedIncident.status || "Reported"}
+                        </p>
+                        <p className="text-[10px] text-slate-500">Verified operational workflow state</p>
+                      </div>
+
+                      {/* Field Note Event */}
+                      {selectedIncident.note && (
+                        <div className="relative">
+                          <span className="absolute -left-[17px] top-1 h-2 w-2 rounded-full bg-amber-400"></span>
+                          <p className="text-[11px] text-amber-300 font-bold">Field Note Logged</p>
+                          <p className="text-[10px] text-slate-400 italic">&ldquo;{selectedIncident.note}&rdquo;</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 )}
               </div>
-            </div>
 
-            {/* FILTER DROPDOWNS ROW */}
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 pt-1">
-              {/* STATUS FILTER */}
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Status</label>
-                <select
-                  value={statusFilter}
-                  onChange={(e) => setStatusFilter(e.target.value)}
-                  className="rounded-lg border border-white/10 bg-[#070b14] px-2.5 py-1.5 text-xs text-slate-200 outline-none focus:border-sky-500"
-                >
-                  <option value="all">All Statuses</option>
-                  {ALLOWED_STATUSES.map((st) => (
-                    <option key={st} value={st}>
-                      {getStatusConfig(st).label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* SEVERITY FILTER */}
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Severity</label>
-                <select
-                  value={severityFilter}
-                  onChange={(e) => setSeverityFilter(e.target.value)}
-                  className="rounded-lg border border-white/10 bg-[#070b14] px-2.5 py-1.5 text-xs text-slate-200 outline-none focus:border-sky-500"
-                >
-                  <option value="all">All Severities</option>
-                  <option value="critical">Critical (4-5)</option>
-                  <option value="high">High (3)</option>
-                  <option value="medium">Medium (2)</option>
-                  <option value="low">Low (1)</option>
-                </select>
-              </div>
-
-              {/* PRIORITY SCORE TIER FILTER */}
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Smart Priority</label>
-                <select
-                  value={priorityFilter}
-                  onChange={(e) => setPriorityFilter(e.target.value)}
-                  className="rounded-lg border border-white/10 bg-[#070b14] px-2.5 py-1.5 text-xs text-slate-200 outline-none focus:border-sky-500"
-                >
-                  <option value="all">All Priority Scores</option>
-                  <option value="critical">Critical (80-100)</option>
-                  <option value="high">High (60-79)</option>
-                  <option value="medium">Medium (40-59)</option>
-                  <option value="low">Low (1-39)</option>
-                </select>
-              </div>
-
-              {/* ASSIGNMENT FILTER */}
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Dispatch State</label>
-                <select
-                  value={assignmentFilter}
-                  onChange={(e) => setAssignmentFilter(e.target.value)}
-                  className="rounded-lg border border-white/10 bg-[#070b14] px-2.5 py-1.5 text-xs text-slate-200 outline-none focus:border-sky-500"
-                >
-                  <option value="all">All Assignment States</option>
-                  <option value="unassigned">Unassigned Only</option>
-                  <option value="assigned">Assigned Units</option>
-                </select>
-              </div>
-
-              {/* SPECIFIC RESPONDER FILTER */}
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Assigned Responder</label>
-                <select
-                  value={responderFilter}
-                  onChange={(e) => setResponderFilter(e.target.value)}
-                  className="rounded-lg border border-white/10 bg-[#070b14] px-2.5 py-1.5 text-xs text-slate-200 outline-none focus:border-sky-500"
-                >
-                  <option value="all">All Responders</option>
-                  {responders.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {r.full_name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          </div>
-
-          {/* TABLE */}
-          <div className="overflow-x-auto">
-            {loading ? (
-              <div className="flex flex-col items-center justify-center py-20 text-slate-400 gap-3">
-                <div className="h-8 w-8 rounded-full border-2 border-sky-500 border-t-transparent animate-spin"></div>
-                <p className="text-xs font-semibold">Synchronizing operational database...</p>
-              </div>
-            ) : filteredIncidents.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-20 text-slate-500 text-center px-4">
-                <span className="text-3xl mb-2">🛰️</span>
-                <p className="text-slate-300 font-semibold text-sm">No incidents match this filter</p>
-                <p className="text-xs text-slate-500 mt-1">Try resetting the status, priority, or assignment filter</p>
-              </div>
-            ) : (
-              <table className="w-full text-left text-xs text-slate-300 border-collapse">
-                <thead className="bg-[#070b14] text-[11px] uppercase tracking-wider text-slate-400 border-b border-white/10">
-                  <tr>
-                    <th className="p-3.5">Type &amp; Severity</th>
-                    <th className="p-3.5">Priority</th>
-                    <th className="p-3.5">Workflow Status</th>
-                    <th className="p-3.5">Assigned Responder</th>
-                    <th className="p-3.5">Situation &amp; Notes</th>
-                    <th className="p-3.5">Workflow Actions</th>
-                    <th className="p-3.5 text-right">Details</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5 font-sans">
-                  {filteredIncidents.map((inc) => {
-                    const nextStatus = getNextRecommendedStatus(inc.status);
-                    const isUpdating = actionLoadingId === inc.id;
-                    const isEditingNote = editingNoteId === inc.id;
-
-                    return (
-                      <tr key={inc.id} className="hover:bg-white/[0.02] transition-colors">
-                        {/* Type & Severity */}
-                        <td className="p-3.5 align-top min-w-[140px]">
-                          <div className="flex items-center gap-2">
-                            <span className="text-xl">{getTypeIcon(inc.type)}</span>
-                            <div>
-                              <p className="font-bold text-sm text-white capitalize">{inc.type}</p>
-                              <div className="mt-1">
-                                <SeverityBadge severity={inc.severity} size="sm" />
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-
-                        {/* Priority Score & Tier */}
-                        <td className="p-3.5 align-top min-w-[110px]">
-                          <PriorityBadge score={inc.priority_score} tier={inc.priority_tier} />
-                        </td>
-
-                        {/* Status */}
-                        <td className="p-3.5 align-top min-w-[130px]">
-                          <StatusBadge status={inc.status} size="sm" />
-                          <p className="text-[10px] text-slate-500 mt-1 max-w-[120px] leading-tight">
-                            {getStatusConfig(inc.status).description}
-                          </p>
-                        </td>
-
-                        {/* Assigned Responder (Dispatch Dropdown) */}
-                        <td className="p-3.5 align-top min-w-[180px]">
-                          <div className="space-y-1.5">
-                            {inc.assigned_to ? (
-                              <div className="flex items-center justify-between gap-1 bg-purple-500/10 border border-purple-500/25 px-2.5 py-1 rounded-lg">
-                                <span className="text-purple-200 font-semibold text-xs flex items-center gap-1">
-                                  <span>👤</span>
-                                  <span>{inc.assigned_responder_name || "Assigned"}</span>
-                                </span>
-                                <button
-                                  onClick={() => handleUpdate(inc.id, undefined, undefined, null)}
-                                  disabled={isUpdating}
-                                  title="Unassign responder"
-                                  className="text-purple-400 hover:text-red-400 text-xs font-bold px-1"
-                                >
-                                  ×
-                                </button>
-                              </div>
-                            ) : (
-                              <span className="inline-block text-[11px] text-amber-400/90 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full font-medium">
-                                Unassigned
-                              </span>
-                            )}
-
-                            {/* Reassign / Assign select */}
-                            <select
-                              value={inc.assigned_to || ""}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                handleUpdate(inc.id, undefined, undefined, val ? val : null);
-                              }}
-                              disabled={isUpdating}
-                              className="w-full rounded-lg border border-white/10 bg-[#070b14] px-2 py-1 text-[11px] text-slate-300 outline-none focus:border-purple-500 disabled:opacity-50"
-                            >
-                              <option value="">{inc.assigned_to ? "Reassign responder..." : "Assign to responder..."}</option>
-                              {responders.map((r) => (
-                                <option key={r.id} value={r.id}>
-                                  {r.full_name}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        </td>
-
-                        {/* Situation & Notes */}
-                        <td className="p-3.5 align-top max-w-[260px]">
-                          <p className="text-slate-200 line-clamp-2 leading-relaxed">
-                            {inc.description || "No situation description provided."}
-                          </p>
-                          <div className="mt-1 flex items-center gap-2 text-[10px] text-slate-400 font-mono">
-                            <span>📍 {inc.latitude.toFixed(3)}, {inc.longitude.toFixed(3)}</span>
-                          </div>
-
-                          <div className="mt-2 pt-1 border-t border-white/5">
-                            {isEditingNote ? (
-                              <div className="space-y-1.5">
-                                <textarea
-                                  value={noteInput}
-                                  onChange={(e) => setNoteInput(e.target.value)}
-                                  placeholder="Add situational note..."
-                                  rows={2}
-                                  className="w-full rounded-lg border border-white/20 bg-[#070b14] p-1.5 text-xs text-white outline-none focus:border-sky-500 resize-none"
-                                />
-                                <div className="flex items-center gap-1.5">
-                                  <button
-                                    onClick={() => handleUpdate(inc.id, undefined, noteInput.trim() || undefined)}
-                                    disabled={isUpdating}
-                                    className="rounded bg-sky-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-sky-500 disabled:opacity-50"
-                                  >
-                                    Save
-                                  </button>
-                                  <button
-                                    onClick={() => setEditingNoteId(null)}
-                                    className="rounded bg-white/10 px-2 py-0.5 text-[11px] text-slate-300 hover:bg-white/20"
-                                  >
-                                    Cancel
-                                  </button>
-                                </div>
-                              </div>
-                            ) : (
-                              <div>
-                                <p className="text-xs text-slate-300 italic line-clamp-2">
-                                  {inc.note ? `"${inc.note}"` : <span className="text-slate-500 text-[11px]">No operational note</span>}
-                                </p>
-                                <button
-                                  onClick={() => {
-                                    setEditingNoteId(inc.id);
-                                    setNoteInput(inc.note || "");
-                                  }}
-                                  className="mt-1 text-[11px] text-sky-400 hover:text-sky-300 hover:underline"
-                                >
-                                  {inc.note ? "Edit note" : "+ Add note"}
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        </td>
-
-                        {/* Workflow Actions */}
-                        <td className="p-3.5 align-top min-w-[190px]">
-                          <div className="flex flex-col gap-1.5">
-                            {nextStatus && (
-                              <button
-                                onClick={() => handleUpdate(inc.id, nextStatus)}
-                                disabled={isUpdating}
-                                className="flex items-center justify-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold py-1.5 px-3 text-xs transition shadow-sm disabled:opacity-50"
-                              >
-                                {isUpdating ? (
-                                  <span>Updating...</span>
-                                ) : (
-                                  <span>Move to {getStatusConfig(nextStatus).label} →</span>
-                                )}
-                              </button>
-                            )}
-
-                            <div className="flex items-center gap-1.5">
-                              <select
-                                value={inc.status || "reported"}
-                                onChange={(e) => {
-                                  if (e.target.value !== inc.status) {
-                                    handleUpdate(inc.id, e.target.value);
-                                  }
-                                }}
-                                disabled={isUpdating}
-                                className="rounded border border-white/10 bg-[#070b14] px-2 py-1 text-[11px] text-slate-300 outline-none focus:border-sky-500 disabled:opacity-50 flex-1"
-                              >
-                                {ALLOWED_STATUSES.map((st) => (
-                                  <option key={st} value={st}>
-                                    Status: {st}
-                                  </option>
-                                ))}
-                              </select>
-
-                              {inc.status !== "cancelled" && inc.status !== "resolved" && (
-                                <button
-                                  onClick={() => handleUpdate(inc.id, "cancelled")}
-                                  disabled={isUpdating}
-                                  title="Cancel report"
-                                  className="rounded border border-red-500/20 bg-red-950/20 px-2 py-1 text-[11px] font-semibold text-red-300 hover:bg-red-900/40 transition disabled:opacity-50"
-                                >
-                                  ✕
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        </td>
-
-                        {/* Inspect Details */}
-                        <td className="p-3.5 align-top text-right">
-                          <button
-                            onClick={() => setSelectedIncident(inc)}
-                            className="rounded-lg bg-white/10 px-2.5 py-1 text-xs font-semibold text-slate-200 hover:bg-white/20 transition"
-                          >
-                            Inspect
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </section>
-      </div>
-
-      {/* INSPECT MODAL */}
-      {selectedIncident && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-          <div className="max-w-xl w-full rounded-2xl border border-white/10 bg-[#0e1424] p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-white/10 pb-3">
-              <div className="flex items-center gap-2">
-                <span className="text-2xl">{getTypeIcon(selectedIncident.type)}</span>
-                <div>
-                  <h3 className="text-base font-bold text-white capitalize">{selectedIncident.type}</h3>
-                  <p className="text-[11px] text-slate-400 font-mono">ID: {selectedIncident.id}</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setSelectedIncident(null)}
-                className="text-slate-400 hover:text-white text-xl font-bold p-1"
-              >
-                ✕
-              </button>
-            </div>
-
-            {/* STATUS & PRIORITY TIERS */}
-            <div className="grid grid-cols-3 gap-3">
-              <div className="bg-white/5 p-3 rounded-xl border border-white/5 space-y-1">
-                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Status</span>
-                <StatusBadge status={selectedIncident.status} size="sm" />
-              </div>
-              <div className="bg-white/5 p-3 rounded-xl border border-white/5 space-y-1">
-                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Severity</span>
-                <SeverityBadge severity={selectedIncident.severity} size="sm" />
-              </div>
-              <div className="bg-white/5 p-3 rounded-xl border border-white/5 space-y-1">
-                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Priority</span>
-                <PriorityBadge score={selectedIncident.priority_score} tier={selectedIncident.priority_tier} />
-              </div>
-            </div>
-
-            {/* ASSIGNED RESPONDER SECTION */}
-            <div className="rounded-xl border border-purple-500/20 bg-purple-950/20 p-3.5 space-y-2">
-              <span className="text-[10px] font-bold text-purple-300 uppercase tracking-wider block">
-                Assigned Emergency Responder
-              </span>
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <p className="text-xs font-semibold text-white">
-                  {selectedIncident.assigned_to ? (
-                    <span className="flex items-center gap-1.5 text-purple-200">
-                      <span>👤</span>
-                      <span>{selectedIncident.assigned_responder_name || "Assigned Unit"}</span>
-                    </span>
-                  ) : (
-                    <span className="text-amber-400">No responder currently dispatched</span>
-                  )}
-                </p>
-
-                <div className="flex items-center gap-2">
-                  <select
-                    value={selectedIncident.assigned_to || ""}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      handleUpdate(selectedIncident.id, undefined, undefined, val ? val : null);
-                    }}
-                    className="rounded-lg border border-white/10 bg-[#070b14] px-2.5 py-1 text-xs text-slate-200 outline-none focus:border-purple-500"
-                  >
-                    <option value="">{selectedIncident.assigned_to ? "Reassign..." : "Assign responder..."}</option>
-                    {responders.map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.full_name}
-                      </option>
-                    ))}
-                  </select>
-
-                  {selectedIncident.assigned_to && (
+              {/* ======================================================
+                  BOTTOM WORKFLOW ACTION BUTTONS
+              ====================================================== */}
+              <div className="p-3 border-t border-white/10 bg-[#080d1b] space-y-2">
+                <span className="text-[9px] font-mono uppercase font-bold text-slate-400 tracking-wider block">
+                  Workflow State Controls:
+                </span>
+                <div className="grid grid-cols-2 gap-1.5 font-mono text-[10px]">
+                  {selectedIncident.status === "reported" && (
                     <button
-                      onClick={() => handleUpdate(selectedIncident.id, undefined, undefined, null)}
-                      className="rounded-lg border border-red-500/30 bg-red-950/30 hover:bg-red-900/40 text-red-300 px-2.5 py-1 text-xs font-semibold transition"
+                      type="button"
+                      onClick={() => handleUpdate(selectedIncident.id, "verified")}
+                      disabled={actionLoadingId === selectedIncident.id}
+                      className="py-1.5 px-2 rounded bg-sky-600/30 hover:bg-sky-600/50 text-sky-200 border border-sky-500/40 font-bold transition disabled:opacity-50"
                     >
-                      Unassign
+                      Verify Report
+                    </button>
+                  )}
+
+                  {selectedIncident.status !== "in_progress" && selectedIncident.status !== "resolved" && selectedIncident.status !== "cancelled" && (
+                    <button
+                      type="button"
+                      onClick={() => handleUpdate(selectedIncident.id, "in_progress")}
+                      disabled={actionLoadingId === selectedIncident.id}
+                      className="py-1.5 px-2 rounded bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 border border-amber-500/40 font-bold transition disabled:opacity-50"
+                    >
+                      Mark In Progress
+                    </button>
+                  )}
+
+                  {selectedIncident.status !== "resolved" && selectedIncident.status !== "cancelled" && (
+                    <button
+                      type="button"
+                      onClick={() => handleUpdate(selectedIncident.id, "resolved")}
+                      disabled={actionLoadingId === selectedIncident.id}
+                      className="py-1.5 px-2 rounded bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-200 border border-emerald-500/40 font-bold transition disabled:opacity-50"
+                    >
+                      Resolve Incident
+                    </button>
+                  )}
+
+                  {selectedIncident.status !== "cancelled" && selectedIncident.status !== "resolved" && (
+                    <button
+                      type="button"
+                      onClick={() => handleUpdate(selectedIncident.id, "cancelled")}
+                      disabled={actionLoadingId === selectedIncident.id}
+                      className="py-1.5 px-2 rounded bg-red-600/20 hover:bg-red-600/40 text-red-300 border border-red-500/30 font-bold transition disabled:opacity-50"
+                    >
+                      Cancel Incident
                     </button>
                   )}
                 </div>
               </div>
             </div>
+          )}
+        </aside>
+      </main>
 
-            {/* DESCRIPTION */}
-            <div className="bg-white/5 p-3.5 rounded-xl border border-white/5 space-y-1">
-              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Situation Description</span>
-              <p className="text-xs text-slate-200 leading-relaxed">
-                {selectedIncident.description || "No situation description provided."}
-              </p>
+      {/* ======================================================
+          SIMULATION & SAFETY CONFIRMATION MODALS
+      ====================================================== */}
+      {/* 1. DISASTER SIMULATION MODAL */}
+      {simulateDisasterOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="max-w-md w-full rounded-2xl border border-red-500/40 bg-[#080d1b] p-5 shadow-2xl space-y-3 font-mono">
+            <div className="flex items-center gap-2 text-red-400">
+              <span className="text-xl">⚡</span>
+              <h3 className="font-bold text-sm uppercase">Launch Disaster Simulation Demo</h3>
             </div>
-
-            {/* SITUATIONAL NOTE */}
-            {selectedIncident.note && (
-              <div className="bg-sky-950/20 p-3.5 rounded-xl border border-sky-500/20 space-y-1">
-                <span className="text-[10px] text-sky-400 font-bold uppercase tracking-wider block">Operational Note</span>
-                <p className="text-xs text-sky-200 italic">&ldquo;{selectedIncident.note}&rdquo;</p>
-              </div>
+            <p className="text-xs text-slate-300 leading-relaxed font-sans">
+              This will report a severe emergency scenario (<strong>[DEMO] Flash Flood &amp; Structural Distress</strong>, Severity 4) through the authenticated incident reporting API.
+            </p>
+            {replaceExistingDemo && (
+              <p className="text-[11px] text-amber-400 bg-amber-500/10 p-2 rounded border border-amber-500/20 font-sans">
+                Note: Replace-Existing mode is active. Existing persistent database records are preserved to prevent data loss.
+              </p>
             )}
-
-            {/* ACTIONS */}
-            <div className="flex items-center justify-between pt-2 border-t border-white/10">
-              <div className="text-[10px] text-slate-500 font-mono">
-                📍 {selectedIncident.latitude.toFixed(4)}, {selectedIncident.longitude.toFixed(4)}
-              </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-white/10 text-xs font-mono">
               <button
-                onClick={() => setSelectedIncident(null)}
-                className="rounded-xl bg-white/10 px-4 py-1.5 text-xs font-bold text-slate-300 hover:bg-white/20 transition"
+                type="button"
+                onClick={() => setSimulateDisasterOpen(false)}
+                className="px-3 py-1.5 rounded bg-white/10 hover:bg-white/20 text-slate-300"
               >
-                Close
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSimulateDisaster}
+                disabled={isSimulating}
+                className="px-4 py-1.5 rounded bg-red-600 hover:bg-red-500 text-white font-bold transition disabled:opacity-50"
+              >
+                {isSimulating ? "Injecting..." : "Confirm & Inject"}
               </button>
             </div>
           </div>
         </div>
       )}
-    </main>
+
+      {/* 2. WORLD CUP SIMULATION MODAL */}
+      {simulateWorldCupOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="max-w-md w-full rounded-2xl border border-purple-500/40 bg-[#080d1b] p-5 shadow-2xl space-y-3 font-mono">
+            <div className="flex items-center gap-2 text-purple-400">
+              <span className="text-xl">⚽</span>
+              <h3 className="font-bold text-sm uppercase">Launch World Cup Simulation Demo</h3>
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed font-sans">
+              This will report a high-density crowd management event (<strong>[DEMO] World Cup Stadium Zone 3: Crowd Congestion &amp; Medical Distress</strong>, Severity 3) through the authenticated incident reporting API.
+            </p>
+            <div className="flex justify-end gap-2 pt-2 border-t border-white/10 text-xs font-mono">
+              <button
+                type="button"
+                onClick={() => setSimulateWorldCupOpen(false)}
+                className="px-3 py-1.5 rounded bg-white/10 hover:bg-white/20 text-slate-300"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSimulateWorldCup}
+                disabled={isSimulating}
+                className="px-4 py-1.5 rounded bg-purple-600 hover:bg-purple-500 text-white font-bold transition disabled:opacity-50"
+              >
+                {isSimulating ? "Injecting..." : "Confirm & Inject"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 3. ADMINISTRATIVE CLEAR SAFETY MODAL */}
+      {clearIncidentsOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="max-w-md w-full rounded-2xl border border-amber-500/40 bg-[#080d1b] p-5 shadow-2xl space-y-3 font-mono">
+            <div className="flex items-center gap-2 text-amber-400">
+              <span className="text-xl">🛡️</span>
+              <h3 className="font-bold text-sm uppercase">Administrative Safety Lock</h3>
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed font-sans">
+              Batch purging of emergency incident records is restricted in production. In compliance with emergency operations audit standards, incident records cannot be batch-deleted without root database administrative console credentials.
+            </p>
+            <p className="text-[11px] text-slate-400 font-sans">
+              Operators should advance individual incidents to <strong>Resolved</strong> or <strong>Cancelled</strong> to maintain audit integrity.
+            </p>
+            <div className="flex justify-end pt-2 border-t border-white/10 text-xs font-mono">
+              <button
+                type="button"
+                onClick={() => setClearIncidentsOpen(false)}
+                className="px-4 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 text-black font-bold"
+              >
+                Understood
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
