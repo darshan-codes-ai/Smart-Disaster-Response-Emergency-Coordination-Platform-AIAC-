@@ -265,9 +265,7 @@ export default function DisasterMap({
             "osm-tiles": {
               type: "raster",
               tiles: [
-                "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-                "https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-                "https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
+                "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
               ],
               tileSize: 256,
               attribution:
