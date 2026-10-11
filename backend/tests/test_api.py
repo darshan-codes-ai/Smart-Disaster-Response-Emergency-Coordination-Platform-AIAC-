@@ -1639,6 +1639,199 @@ class IncidentApiSecurityTests(unittest.TestCase):
         self.assertEqual(data["order"], "asc")
         self.assertEqual(range_calls[0], (5, 104))
 
+    # ============================================================
+    # 14. Phase 5 Reliability, Compensating Rollbacks & Data Integrity
+    # ============================================================
+    @patch("backend.main.supabase")
+    def test_audit_write_failure_during_create_rolls_back_incident(self, mock_supabase):
+        """If audit event logging fails after incident creation, compensating delete rolls back the incident."""
+        cit_user = {"id": "cit-rollback", "role": "citizen", "email": "cit@test.com", "full_name": "Rollback Cit"}
+        app.dependency_overrides[get_current_user] = lambda: cit_user
+
+        deleted_ids = []
+
+        def table_side_effect(table_name):
+            mock = MagicMock()
+            if table_name == "incidents":
+                # Successful insert
+                mock.insert.return_value.execute.return_value.data = [{
+                    "id": "inc-rollback-1",
+                    "user_id": "cit-rollback",
+                    "type": "Fire",
+                    "description": "Blaze",
+                    "latitude": 12.0,
+                    "longitude": 77.0,
+                    "severity": 4,
+                    "status": "reported",
+                }]
+                # Compensating delete
+                def record_delete():
+                    m_del = MagicMock()
+                    m_del.eq.side_effect = lambda col, val: deleted_ids.append((col, val)) or MagicMock(execute=lambda: MagicMock(data=[{}]))
+                    return m_del
+                mock.delete.side_effect = record_delete
+            elif table_name == "incident_events":
+                # Simulated audit failure
+                mock.insert.side_effect = Exception("Audit storage disk full")
+            return mock
+
+        mock_supabase.table.side_effect = table_side_effect
+
+        resp = self.client.post("/incidents", json={
+            "type": "Fire",
+            "description": "Blaze",
+            "location": {"lat": 12.0, "lng": 77.0},
+            "severity": 4
+        })
+
+        self.assertEqual(resp.status_code, 500)
+        self.assertIn("rolled back", resp.json()["detail"].lower())
+        # Verify compensating delete was called
+        self.assertTrue(any(col == "id" for col, _ in deleted_ids))
+
+    @patch("backend.main.supabase")
+    def test_audit_write_failure_during_update_rolls_back_incident(self, mock_supabase):
+        """If audit event logging fails after incident update, compensating update reverts the row."""
+        cc_user = {"id": "cc-rollback", "role": "command_center", "email": "cc@rescue.gov", "full_name": "Dispatcher"}
+        app.dependency_overrides[get_current_user] = lambda: cc_user
+
+        reverted_payloads = []
+
+        def table_side_effect(table_name):
+            mock = MagicMock()
+            if table_name == "incidents":
+                # 1. Existing incident
+                mock.select.return_value.eq.return_value.execute.return_value.data = [{
+                    "id": "inc-up-rollback",
+                    "user_id": "cit-1",
+                    "status": "reported",
+                    "note": None,
+                    "assigned_to": None,
+                    "priority_score": 40,
+                    "updated_at": "2026-10-01T00:00:00Z",
+                    "severity": 3,
+                    "type": "Flood"
+                }]
+                # 2. Update call
+                def record_update(payload):
+                    if "status" in payload and payload["status"] == "verified":
+                        # Normal update
+                        m_up = MagicMock()
+                        m_up.eq.return_value.execute.return_value.data = [{
+                            "id": "inc-up-rollback",
+                            "status": "verified",
+                            "note": None,
+                            "assigned_to": None,
+                            "priority_score": 35,
+                            "updated_at": "2026-10-12T00:00:00Z"
+                        }]
+                        return m_up
+                    else:
+                        # Compensating revert
+                        reverted_payloads.append(payload)
+                        m_rev = MagicMock()
+                        m_rev.eq.return_value.execute.return_value.data = [{}]
+                        return m_rev
+
+                mock.update.side_effect = record_update
+            elif table_name == "incident_events":
+                mock.insert.side_effect = Exception("Network timeout inserting audit event")
+            return mock
+
+        mock_supabase.table.side_effect = table_side_effect
+
+        resp = self.client.patch("/incidents/inc-up-rollback", json={"status": "verified"})
+        self.assertEqual(resp.status_code, 500)
+        self.assertIn("rolled back", resp.json()["detail"].lower())
+        # Verify compensating revert was executed with the original status 'reported'
+        self.assertTrue(len(reverted_payloads) > 0)
+        self.assertEqual(reverted_payloads[0]["status"], "reported")
+
+    @patch("backend.main.supabase")
+    def test_audit_metadata_sanitizes_sensitive_secrets(self, mock_supabase):
+        """Audit logging strictly sanitizes out access tokens, passwords, and secrets from metadata."""
+        from backend.main import log_incident_event
+
+        captured_records = []
+        mock_events = MagicMock()
+        mock_events.insert.side_effect = lambda rec: captured_records.append(rec) or MagicMock(execute=lambda: MagicMock(data=[rec]))
+        mock_supabase.table.return_value = mock_events
+
+        log_incident_event(
+            incident_id="inc-sec-1",
+            actor_id="actor-123",
+            event_type="status_changed",
+            metadata={
+                "actor_name": "Sam",
+                "access_token": "secret-jwt-token-123",
+                "bearer_token": "secret-bearer",
+                "api_key": "top-secret-key",
+                "password": "super-secret-password",
+                "action_label": "Status updated"
+            }
+        )
+
+        self.assertEqual(len(captured_records), 1)
+        meta = captured_records[0]["metadata"]
+        self.assertEqual(meta["actor_name"], "Sam")
+        self.assertEqual(meta["action_label"], "Status updated")
+        self.assertNotIn("access_token", meta)
+        self.assertNotIn("bearer_token", meta)
+        self.assertNotIn("api_key", meta)
+        self.assertNotIn("password", meta)
+
+    def test_empty_or_whitespace_incident_id_rejected(self):
+        """Requests with empty or whitespace incident IDs are rejected with 400 Bad Request."""
+        admin = {"id": "admin-1", "role": "admin", "email": "admin@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: admin
+
+        resp_get = self.client.get("/incidents/%20")
+        self.assertEqual(resp_get.status_code, 400)
+        self.assertIn("Incident ID cannot be empty", resp_get.json()["detail"])
+
+        resp_patch = self.client.patch("/incidents/%20", json={"status": "verified"})
+        self.assertEqual(resp_patch.status_code, 400)
+        self.assertIn("Incident ID cannot be empty", resp_patch.json()["detail"])
+
+        resp_events = self.client.get("/incidents/%20/events")
+        self.assertEqual(resp_events.status_code, 400)
+        self.assertIn("Incident ID cannot be empty", resp_events.json()["detail"])
+
+    def test_oversized_payloads_rejected(self):
+        """Oversized fields (> 2000 chars) are rejected by input validation."""
+        cc = {"id": "cc-1", "role": "command_center", "email": "cc@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: cc
+
+        huge_string = "A" * 2500
+
+        # Oversized note in PATCH
+        resp_patch = self.client.patch("/incidents/inc-123", json={"note": huge_string})
+        self.assertIn(resp_patch.status_code, [400, 422])
+
+        # Oversized description in POST
+        resp_post = self.client.post("/incidents", json={
+            "type": "Fire",
+            "description": huge_string,
+            "location": {"lat": 10.0, "lng": 20.0}
+        })
+        self.assertIn(resp_post.status_code, [400, 422])
+
+    @patch("backend.main.supabase")
+    def test_database_error_responses_do_not_leak_internals(self, mock_supabase):
+        """Internal database errors return sanitized messages and do not leak driver internals."""
+        cc = {"id": "cc-1", "role": "command_center", "email": "cc@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: cc
+
+        mock_supabase.table.side_effect = Exception("psycopg2.OperationalError: password auth failed for user postgres on 10.0.0.1")
+
+        resp = self.client.get("/incidents/inc-crash")
+        self.assertEqual(resp.status_code, 500)
+        detail = resp.json()["detail"]
+        self.assertNotIn("psycopg2", detail)
+        self.assertNotIn("10.0.0.1", detail)
+        self.assertNotIn("postgres", detail)
+        self.assertIn("internal database error occurred", detail.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

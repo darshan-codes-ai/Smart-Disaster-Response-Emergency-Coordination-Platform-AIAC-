@@ -109,16 +109,16 @@ class Location(BaseModel):
 
 
 class IncidentCreate(BaseModel):
-    type: str
-    description: str
+    type: str = Field(..., min_length=1, max_length=100)
+    description: str = Field(..., min_length=1, max_length=2000)
     location: Location
     severity: Optional[int] = Field(default=3, ge=1, le=5)
 
 
 class IncidentUpdate(BaseModel):
-    status: Optional[str] = None
-    note: Optional[str] = None
-    assigned_to: Optional[str] = None
+    status: Optional[str] = Field(default=None, max_length=50)
+    note: Optional[str] = Field(default=None, max_length=2000)
+    assigned_to: Optional[str] = Field(default=None, max_length=100)
 
 
 # ============================================================
@@ -299,9 +299,17 @@ def log_incident_event(
     actor_id is always derived from authenticated user (never client input).
     """
     now = created_at or datetime.now(timezone.utc).isoformat()
-    meta = dict(metadata or {})
-    if "action_label" not in meta:
-        meta["action_label"] = get_default_action_label(event_type, new_state)
+    raw_meta = dict(metadata or {})
+    if "action_label" not in raw_meta:
+        raw_meta["action_label"] = get_default_action_label(event_type, new_state)
+
+    # Sanitize metadata: strictly exclude any sensitive tokens or secrets
+    sensitive_substrings = ("token", "password", "secret", "bearer", "authorization", "key")
+    sanitized_meta = {
+        str(k): v
+        for k, v in raw_meta.items()
+        if not any(sub in str(k).lower() for sub in sensitive_substrings)
+    }
 
     event_record = {
         "id": str(uuid.uuid4()),
@@ -310,7 +318,7 @@ def log_incident_event(
         "event_type": event_type,
         "previous_state": previous_state,
         "new_state": new_state,
-        "metadata": meta,
+        "metadata": sanitized_meta,
         "created_at": now,
     }
     try:
@@ -433,10 +441,12 @@ def health():
             "database": "connected"
         }
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return {
             "status": "unhealthy",
             "database": "error",
-            "detail": str(e)
+            "detail": "Database connection unavailable"
         }
 
 
@@ -475,9 +485,11 @@ def get_responders(
             })
         return {"responders": responders}
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
-            detail=f"Database error loading responders: {str(e)}"
+            detail="An internal database error occurred while retrieving responders"
         )
 
 
@@ -532,7 +544,7 @@ def create_incident(
             )
 
         created_row = response.data[0]
-        log_incident_event(
+        audit_res = log_incident_event(
             incident_id=incident_id,
             actor_id=current_user["id"],
             event_type="incident_created",
@@ -553,6 +565,17 @@ def create_incident(
             created_at=now,
         )
 
+        if audit_res is None:
+            # Compensating rollback: delete newly inserted incident so system never retains un-audited state
+            try:
+                supabase.table("incidents").delete().eq("id", incident_id).execute()
+            except Exception as rb_exc:
+                print(f"Warning: Compensating delete failed for incident {incident_id}: {rb_exc}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to persist incident audit log; transaction rolled back."
+            )
+
         return {
             "message": "Incident created successfully",
             "incident": enrich_incident_data(created_row)
@@ -565,7 +588,7 @@ def create_incident(
         traceback.print_exc()
         raise HTTPException(
             status_code=500,
-            detail=f"Database error: {type(e).__name__}: {e}"
+            detail="An internal database error occurred while creating the incident"
         )
 
 
@@ -618,7 +641,7 @@ def get_incidents(current_user=Depends(get_current_user)):
     traceback.print_exc()
     raise HTTPException(
         status_code=500,
-        detail=f"Database error after 3 attempts: {type(last_error).__name__}: {last_error}"
+        detail="An internal database error occurred while synchronizing incident records"
     )
 
 
@@ -631,6 +654,9 @@ def get_incident(
     incident_id: str,
     current_user=Depends(get_current_user)
 ):
+    if not incident_id or not incident_id.strip():
+        raise HTTPException(status_code=400, detail="Incident ID cannot be empty")
+
     try:
         response = (
             supabase
@@ -672,9 +698,11 @@ def get_incident(
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
-            detail=f"Database error: {str(e)}"
+            detail="An internal database error occurred while retrieving the incident"
         )
 
 
@@ -688,6 +716,9 @@ def update_incident(
     update: IncidentUpdate,
     current_user=Depends(get_current_user)
 ):
+    if not incident_id or not incident_id.strip():
+        raise HTTPException(status_code=400, detail="Incident ID cannot be empty")
+
     if not update.model_fields_set:
         raise HTTPException(
             status_code=400,
@@ -883,17 +914,18 @@ def update_incident(
                 pass
 
         # ----------------------------------------------------
-        # AUDIT TRAIL LOGGING (PHASE 5.1)
+        # AUDIT TRAIL LOGGING (PHASE 5.1 & 5.3)
         # ----------------------------------------------------
         actor_id = current_user["id"]
         actor_name = current_user.get("full_name") or "User"
         actor_role = current_user.get("role") or "citizen"
+        audit_failed = False
 
         # 1. Status change event
         old_status = incident.get("status")
         new_status = updated_row.get("status")
         if new_status and old_status != new_status:
-            log_incident_event(
+            ev = log_incident_event(
                 incident_id=incident_id,
                 actor_id=actor_id,
                 event_type="status_changed",
@@ -905,9 +937,11 @@ def update_incident(
                     "action_label": f"Status changed to {new_status}",
                 },
             )
+            if ev is None:
+                audit_failed = True
 
         # 2. Responder assignment / unassignment event
-        if has_assignment_change:
+        if has_assignment_change and not audit_failed:
             old_assigned = incident.get("assigned_to")
             new_assigned = updated_row.get("assigned_to")
             old_assigned_str = str(old_assigned) if old_assigned else None
@@ -917,7 +951,7 @@ def update_incident(
                     target_name = responder_lookup.get(str(new_assigned))
                     if not target_name and "target_profile" in locals() and target_profile:
                         target_name = target_profile.get("full_name")
-                    log_incident_event(
+                    ev = log_incident_event(
                         incident_id=incident_id,
                         actor_id=actor_id,
                         event_type="responder_assigned",
@@ -930,8 +964,10 @@ def update_incident(
                             "action_label": f"Assigned to {target_name or 'responder'}",
                         },
                     )
+                    if ev is None:
+                        audit_failed = True
                 else:
-                    log_incident_event(
+                    ev = log_incident_event(
                         incident_id=incident_id,
                         actor_id=actor_id,
                         event_type="responder_unassigned",
@@ -943,14 +979,16 @@ def update_incident(
                             "action_label": "Responder unassigned",
                         },
                     )
+                    if ev is None:
+                        audit_failed = True
 
         # 3. Field note event
         old_note = incident.get("note")
         new_note = updated_row.get("note")
-        if "note" in update.model_fields_set and (old_note != new_note):
+        if "note" in update.model_fields_set and (old_note != new_note) and not audit_failed:
             ev_type = "note_added" if not old_note else "note_updated"
             act_label = "Field note added" if not old_note else "Field note updated"
-            log_incident_event(
+            ev = log_incident_event(
                 incident_id=incident_id,
                 actor_id=actor_id,
                 event_type=ev_type,
@@ -962,6 +1000,26 @@ def update_incident(
                     "action_label": act_label,
                 },
             )
+            if ev is None:
+                audit_failed = True
+
+        if audit_failed:
+            # Compensating rollback: restore incident to original snapshot
+            try:
+                revert_payload = {
+                    "status": incident.get("status"),
+                    "note": incident.get("note"),
+                    "assigned_to": incident.get("assigned_to"),
+                    "priority_score": incident.get("priority_score"),
+                    "updated_at": incident.get("updated_at"),
+                }
+                supabase.table("incidents").update(revert_payload).eq("id", incident_id).execute()
+            except Exception as rev_err:
+                print(f"Warning: Compensating rollback failed for incident {incident_id}: {rev_err}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to record persistent audit event. Incident update was rolled back."
+            )
 
         enriched = enrich_incident_data(updated_row, responder_lookup)
         return {
@@ -972,9 +1030,11 @@ def update_incident(
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
-            detail=f"Database error: {str(e)}"
+            detail="An internal database error occurred while updating the incident"
         )
 
 
@@ -998,6 +1058,9 @@ def get_incident_events(
     - Citizens only receive audit events for incidents they personally reported.
     - Events are ordered deterministically by created_at, with bounded pagination.
     """
+    if not incident_id or not incident_id.strip():
+        raise HTTPException(status_code=400, detail="Incident ID cannot be empty")
+
     clamped_limit = max(1, min(100, limit))
     clamped_offset = max(0, offset)
     is_desc = order.strip().lower() != "asc"
@@ -1094,7 +1157,9 @@ def get_incident_events(
     except HTTPException:
         raise
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
-            detail=f"Database error loading audit events: {str(exc)}"
+            detail="An internal database error occurred while retrieving audit events"
         )
