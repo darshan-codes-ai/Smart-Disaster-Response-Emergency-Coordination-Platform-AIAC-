@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import type { Incident } from "../../components/disaster-map";
@@ -203,12 +203,14 @@ export default function CommandCenterPage() {
   const [replaceExistingDemo, setReplaceExistingDemo] = useState<boolean>(false);
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
 
-  // Persistent Audit History (Phase 5.1)
+  // Persistent Audit History (Phase 5.1 & Phase 5.5)
   const [auditEvents, setAuditEvents] = useState<IncidentEvent[]>([]);
   const [eventsLoading, setEventsLoading] = useState<boolean>(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
+  const activeFetchIncidentIdRef = useRef<string | null>(null);
 
   const fetchAuditEvents = useCallback(async (incidentId: string) => {
+    activeFetchIncidentIdRef.current = incidentId;
     try {
       setEventsLoading(true);
       setEventsError(null);
@@ -235,23 +237,43 @@ export default function CommandCenterPage() {
       }
 
       const data = await res.json();
-      setAuditEvents(Array.isArray(data?.events) ? data.events : []);
+      // Ensure responses for previously selected incidents are discarded
+      if (activeFetchIncidentIdRef.current === incidentId) {
+        const list: IncidentEvent[] = Array.isArray(data?.events) ? data.events : [];
+        const seen = new Set<string>();
+        const uniqueEvents: IncidentEvent[] = [];
+        for (const ev of list) {
+          if (ev.id && !seen.has(ev.id)) {
+            seen.add(ev.id);
+            uniqueEvents.push(ev);
+          }
+        }
+        setAuditEvents(uniqueEvents);
+      }
     } catch (err) {
-      console.error("Failed to load audit events:", err);
-      setEventsError(err instanceof Error ? err.message : "Failed to load audit history");
+      if (activeFetchIncidentIdRef.current === incidentId) {
+        console.error("Failed to load audit events:", err);
+        setEventsError(err instanceof Error ? err.message : "Failed to load audit history");
+      }
     } finally {
-      setEventsLoading(false);
+      if (activeFetchIncidentIdRef.current === incidentId) {
+        setEventsLoading(false);
+      }
     }
   }, []);
 
   const handleSelectIncident = useCallback((inc: Incident | null) => {
     setSelectedIncident(inc);
     setFieldNoteText(inc?.note || "");
+    // Clear previous audit events immediately to avoid stale display
+    setAuditEvents([]);
+    setEventsError(null);
     if (inc) {
       setShowDetails(true);
-      fetchAuditEvents(inc.id);
+      activeFetchIncidentIdRef.current = inc.id;
+      void fetchAuditEvents(inc.id);
     } else {
-      setAuditEvents([]);
+      activeFetchIncidentIdRef.current = null;
     }
   }, [fetchAuditEvents]);
 
@@ -345,6 +367,12 @@ export default function CommandCenterPage() {
     };
   }, [userLoading, isCommandCenter, role, fetchIncidents, fetchResponders]);
 
+  // Stable ref for selected incident to avoid re-subscribing channels on every click
+  const selectedIncidentRef = useRef<Incident | null>(selectedIncident);
+  useEffect(() => {
+    selectedIncidentRef.current = selectedIncident;
+  }, [selectedIncident]);
+
   // ------------------------------------------------------------
   // REAL-TIME UPDATES (SUPABASE REALTIME + 15s POLLING FALLBACK)
   // ------------------------------------------------------------
@@ -370,16 +398,14 @@ export default function CommandCenterPage() {
             event: "*",
             schema: "public",
             table: "incident_events",
-            ...(selectedIncident?.id
-              ? { filter: `incident_id=eq.${selectedIncident.id}` }
-              : {}),
           },
           (payload) => {
+            const currentSelectedId = selectedIncidentRef.current?.id;
             const row = (payload.new && Object.keys(payload.new).length
               ? payload.new
               : payload.old) as { incident_id?: string } | undefined;
-            if (selectedIncident?.id && row?.incident_id === selectedIncident.id) {
-              void fetchAuditEvents(selectedIncident.id);
+            if (currentSelectedId && row?.incident_id === currentSelectedId) {
+              void fetchAuditEvents(currentSelectedId);
             }
           }
         )
@@ -409,7 +435,7 @@ export default function CommandCenterPage() {
         }
       }
     };
-  }, [fetchIncidents, fetchAuditEvents, selectedIncident?.id]);
+  }, [fetchIncidents, fetchAuditEvents]);
 
   // ------------------------------------------------------------
   // UPDATE INCIDENT (STATUS, NOTE, DISPATCH ASSIGNMENT)
