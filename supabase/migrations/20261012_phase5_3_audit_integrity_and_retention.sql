@@ -155,3 +155,4 @@ $$;
 -- Grant execution only to trusted service_role
 revoke all on function public.update_incident_with_audit from public, anon, authenticated;
 grant execute on function public.update_incident_with_audit to service_role;
+
