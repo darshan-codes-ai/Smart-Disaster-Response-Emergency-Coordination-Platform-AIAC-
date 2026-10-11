@@ -398,37 +398,52 @@ export default function ResponderPage() {
 
               {/* ACTION BUTTONS FOR LEAD ASSIGNMENT */}
               <div className="flex flex-col sm:flex-row lg:flex-col gap-2.5 min-w-[200px] justify-center">
-                {(leadAssignment.status || "").toLowerCase() !== "in_progress" && (
-                  <button
-                    onClick={() => handleUpdate(leadAssignment.id, "in_progress")}
-                    disabled={actionLoadingId === leadAssignment.id}
-                    className="w-full rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold py-3 px-4 text-xs transition shadow-lg shadow-orange-950/50 flex items-center justify-center gap-2 disabled:opacity-50"
-                  >
-                    <span>⚡</span>
-                    <span>Start Response (In Progress)</span>
-                  </button>
-                )}
+                {leadAssignment.assigned_to === profile?.id || isCommandCenter || role === "admin" ? (
+                  <>
+                    {(leadAssignment.status || "").toLowerCase() !== "in_progress" && (
+                      <button
+                        onClick={() => handleUpdate(leadAssignment.id, "in_progress")}
+                        disabled={actionLoadingId === leadAssignment.id}
+                        className="w-full rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold py-3 px-4 text-xs transition shadow-lg shadow-orange-950/50 flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                        <span>⚡</span>
+                        <span>Start Response (In Progress)</span>
+                      </button>
+                    )}
 
-                {(leadAssignment.status || "").toLowerCase() === "in_progress" && (
-                  <button
-                    onClick={() => handleUpdate(leadAssignment.id, "resolved")}
-                    disabled={actionLoadingId === leadAssignment.id}
-                    className="w-full rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 px-4 text-xs transition shadow-lg shadow-emerald-950/50 flex items-center justify-center gap-2 disabled:opacity-50"
-                  >
-                    <span>✓</span>
-                    <span>Mark Incident Resolved</span>
-                  </button>
-                )}
+                    {(leadAssignment.status || "").toLowerCase() === "in_progress" && (
+                      <button
+                        onClick={() => handleUpdate(leadAssignment.id, "resolved")}
+                        disabled={actionLoadingId === leadAssignment.id}
+                        className="w-full rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 px-4 text-xs transition shadow-lg shadow-emerald-950/50 flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                        <span>✓</span>
+                        <span>Mark Incident Resolved</span>
+                      </button>
+                    )}
 
-                <button
-                  onClick={() => {
-                    setActiveNoteIncidentId(leadAssignment.id);
-                    setNoteText(leadAssignment.note || "");
-                  }}
-                  className="w-full rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-slate-200 font-semibold py-2.5 px-4 text-xs transition"
-                >
-                  {leadAssignment.note ? "Edit Field Note" : "+ Log Field Note"}
-                </button>
+                    <button
+                      onClick={() => {
+                        setActiveNoteIncidentId(leadAssignment.id);
+                        setNoteText(leadAssignment.note || "");
+                      }}
+                      className="w-full rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-slate-200 font-semibold py-2.5 px-4 text-xs transition"
+                    >
+                      {leadAssignment.note ? "Edit Field Note" : "+ Log Field Note"}
+                    </button>
+                  </>
+                ) : (
+                  <div className="rounded-xl bg-white/5 border border-white/10 p-3.5 text-center flex flex-col justify-center">
+                    <span className="text-xs font-semibold text-slate-300">
+                      {leadAssignment.assigned_to ? "Assigned to Another Unit" : "Awaiting Dispatch Assignment"}
+                    </span>
+                    <span className="text-[11px] text-slate-400 mt-1">
+                      {leadAssignment.assigned_to
+                        ? "Read-only view for situational awareness"
+                        : "Command Center will assign this to a responder unit"}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
           </section>
@@ -526,7 +541,8 @@ export default function ResponderPage() {
               const isUpdating = actionLoadingId === inc.id;
               const isAddingNote = activeNoteIncidentId === inc.id;
               const currentStatus = (inc.status || "reported").toLowerCase();
-              const isAssignedToMe = profile?.id && inc.assigned_to === profile.id;
+              const isAssignedToMe = Boolean(profile?.id && inc.assigned_to === profile.id);
+              const canUpdateIncident = isAssignedToMe || isCommandCenter || role === "admin";
 
               return (
                 <div
@@ -634,39 +650,50 @@ export default function ResponderPage() {
 
                   {/* Operational Action Controls (Preserving strict responder permissions: in_progress, resolved) */}
                   <div className="pt-3 border-t border-white/10 space-y-2">
-                    <div className="flex items-center gap-2">
-                      {currentStatus !== "in_progress" && currentStatus !== "resolved" && (
-                        <button
-                          onClick={() => handleUpdate(inc.id, "in_progress")}
-                          disabled={isUpdating}
-                          className="flex-1 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold py-2 px-3 text-xs transition shadow-md shadow-orange-950/50 disabled:opacity-50 flex items-center justify-center gap-1.5"
-                        >
-                          <span>⚡ Start Response</span>
-                        </button>
-                      )}
+                    {canUpdateIncident ? (
+                      <div className="flex items-center gap-2">
+                        {currentStatus !== "in_progress" && currentStatus !== "resolved" && (
+                          <button
+                            onClick={() => handleUpdate(inc.id, "in_progress")}
+                            disabled={isUpdating}
+                            className="flex-1 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold py-2 px-3 text-xs transition shadow-md shadow-orange-950/50 disabled:opacity-50 flex items-center justify-center gap-1.5"
+                          >
+                            <span>⚡ Start Response</span>
+                          </button>
+                        )}
 
-                      {currentStatus === "in_progress" && (
-                        <button
-                          onClick={() => handleUpdate(inc.id, "resolved")}
-                          disabled={isUpdating}
-                          className="flex-1 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-3 text-xs transition shadow-md shadow-emerald-950/50 disabled:opacity-50 flex items-center justify-center gap-1.5"
-                        >
-                          <span>✓ Mark Resolved</span>
-                        </button>
-                      )}
+                        {currentStatus === "in_progress" && (
+                          <button
+                            onClick={() => handleUpdate(inc.id, "resolved")}
+                            disabled={isUpdating}
+                            className="flex-1 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-3 text-xs transition shadow-md shadow-emerald-950/50 disabled:opacity-50 flex items-center justify-center gap-1.5"
+                          >
+                            <span>✓ Mark Resolved</span>
+                          </button>
+                        )}
 
-                      {!isAddingNote && (
-                        <button
-                          onClick={() => {
-                            setActiveNoteIncidentId(inc.id);
-                            setNoteText(inc.note || "");
-                          }}
-                          className="rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-slate-300 px-3 py-2 text-xs font-semibold transition"
-                        >
-                          {inc.note ? "Edit Note" : "+ Note"}
-                        </button>
-                      )}
-                    </div>
+                        {!isAddingNote && (
+                          <button
+                            onClick={() => {
+                              setActiveNoteIncidentId(inc.id);
+                              setNoteText(inc.note || "");
+                            }}
+                            className="rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-slate-300 px-3 py-2 text-xs font-semibold transition"
+                          >
+                            {inc.note ? "Edit Note" : "+ Note"}
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between text-xs text-slate-400 py-1">
+                        <span className="text-[11px] italic">
+                          {inc.assigned_to ? "Assigned to another responder unit" : "Unassigned — dispatch required"}
+                        </span>
+                        <span className="text-[10px] uppercase font-bold text-slate-500 border border-white/10 px-2 py-0.5 rounded-full">
+                          Read Only
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
               );

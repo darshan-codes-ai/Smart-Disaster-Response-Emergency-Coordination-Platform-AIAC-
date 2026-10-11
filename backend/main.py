@@ -497,10 +497,11 @@ def get_incidents(current_user=Depends(get_current_user)):
     for attempt in range(3):
         try:
             client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+            query = client.table("incidents").select("*")
+            if current_user.get("role") not in OPERATIONAL_ROLES:
+                query = query.eq("user_id", current_user["id"])
             response = (
-                client
-                .table("incidents")
-                .select("*")
+                query
                 .order("created_at", desc=True)
                 .execute()
             )
@@ -564,8 +565,8 @@ def get_incident(
         incident = response.data[0]
 
         if (
-            current_user["role"] == "citizen"
-            and incident.get("user_id") != current_user["id"]
+            current_user.get("role") not in OPERATIONAL_ROLES
+            and incident.get("user_id") != current_user.get("id")
         ):
             raise HTTPException(
                 status_code=403,
@@ -648,7 +649,6 @@ def update_incident(
         user_id = current_user.get("id")
 
         update_data = {}
-        has_assignment_change = "assigned_to" in update.model_fields_set
 
         # 1. Assignment Authorization & Validation
         if has_assignment_change:
@@ -658,104 +658,106 @@ def update_incident(
                     detail="Only command_center or admin roles may assign or unassign incidents"
                 )
 
-            if update.assigned_to is not None:
-                # Verify target profile exists and is a responder
-                profile_res = (
-                    supabase
-                    .table("profiles")
-                    .select("id, role, full_name")
-                    .eq("id", target_uuid)
-                    .limit(1)
-                    .execute()
-                )
-                if not profile_res.data:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Target responder with ID '{target_uuid}' does not exist"
-                    )
-                target_profile = profile_res.data[0]
-                if target_profile.get("role") != "responder":
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Target user '{target_uuid}' is not a responder (role is '{target_profile.get('role')}')"
-                    )
+        # 2. Reject unauthorized roles from modifying incidents
+        if user_role in {"hospital", "shelter"}:
+            raise HTTPException(
+                status_code=403,
+                detail="Hospital and shelter roles do not have permission to update incidents"
+            )
 
-                update_data["assigned_to"] = target_uuid
+        if user_role not in {"command_center", "admin", "responder", "citizen"}:
+            raise HTTPException(
+                status_code=403,
+                detail="You do not have permission to update incidents"
+            )
 
-                # When assigning: if current status is reported or verified, auto-change to assigned
-                curr_status = update.status or incident.get("status", "reported")
-                if curr_status in {"reported", "verified"}:
-                    update_data["status"] = "assigned"
-
-            else:
-                # Explicit unassign: assigned_to = null
-                update_data["assigned_to"] = None
-
-                # When unassigning: if current status is assigned, auto-change to verified
-                curr_status = update.status or incident.get("status", "reported")
-                if curr_status == "assigned":
-                    update_data["status"] = "verified"
-
-        # 2. Status Authorization & Validation
-        if update.status is not None:
-            if update.status not in ALLOWED_INCIDENT_STATUSES:
+        # 3. Role-specific validation & update construction
+        if user_role == "citizen":
+            if str(incident.get("user_id")) != str(user_id):
                 raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid status '{update.status}'. Allowed statuses are: {', '.join(sorted(ALLOWED_INCIDENT_STATUSES))}"
+                    status_code=403,
+                    detail="You can only update your own incidents"
                 )
-
-            if user_role == "citizen":
-                if incident.get("user_id") != user_id:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="You can only update your own incidents"
-                    )
+            if update.status is not None:
                 if update.status not in CITIZEN_ALLOWED_STATUSES:
                     raise HTTPException(
                         status_code=403,
                         detail="Citizens may only cancel or provide notes on their own incidents"
                     )
-            elif user_role == "responder":
-                if update.status not in {"in_progress", "resolved"}:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Responders may only mark incidents in_progress or resolved"
+                update_data["status"] = update.status
+            if update.note is not None:
+                update_data["note"] = update.note
+
+        elif user_role == "responder":
+            if update.status is not None and update.status not in {"in_progress", "resolved"}:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Responders may only mark incidents in_progress or resolved"
+                )
+            assigned_to = incident.get("assigned_to")
+            if not assigned_to or str(assigned_to) != str(user_id):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Responders may only update incidents assigned to them"
+                )
+            if update.status is not None:
+                update_data["status"] = update.status
+            if update.note is not None:
+                update_data["note"] = update.note
+
+        elif user_role in {"command_center", "admin"}:
+            if has_assignment_change:
+                if update.assigned_to is not None:
+                    # Verify target profile exists and is a responder
+                    profile_res = (
+                        supabase
+                        .table("profiles")
+                        .select("id, role, full_name")
+                        .eq("id", target_uuid)
+                        .limit(1)
+                        .execute()
                     )
-            elif user_role in {"command_center", "admin"}:
-                pass
-            elif user_role in {"hospital", "shelter"}:
-                pass
-            else:
-                raise HTTPException(
-                    status_code=403,
-                    detail="You do not have permission to update incidents"
-                )
+                    if not profile_res.data:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Target responder with ID '{target_uuid}' does not exist"
+                        )
+                    target_profile = profile_res.data[0]
+                    if target_profile.get("role") != "responder":
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Target user '{target_uuid}' is not a responder (role is '{target_profile.get('role')}')"
+                        )
 
-            update_data["status"] = update.status
+                    update_data["assigned_to"] = target_uuid
 
-        # 3. Note
-        if update.note is not None:
-            if user_role == "citizen" and incident.get("user_id") != user_id:
-                raise HTTPException(
-                    status_code=403,
-                    detail="You can only update your own incidents"
-                )
-            update_data["note"] = update.note
+                    # When assigning: if current status is reported or verified, auto-change to assigned
+                    curr_status = update.status or incident.get("status", "reported")
+                    if curr_status in {"reported", "verified"}:
+                        update_data["status"] = "assigned"
 
-        # Role check for citizen updating with no status/assigned_to
-        if user_role == "citizen" and incident.get("user_id") != user_id:
-            raise HTTPException(
-                status_code=403,
-                detail="You can only update your own incidents"
-            )
+                else:
+                    # Explicit unassign: assigned_to = null
+                    update_data["assigned_to"] = None
 
+                    # When unassigning: if current status is assigned, auto-change to verified
+                    curr_status = update.status or incident.get("status", "reported")
+                    if curr_status == "assigned":
+                        update_data["status"] = "verified"
+
+            if update.status is not None:
+                update_data["status"] = update.status
+            if update.note is not None:
+                update_data["note"] = update.note
+
+        # 4. Check for effective changes
         if not update_data:
             raise HTTPException(
                 status_code=400,
                 detail="No effective changes provided for update"
             )
 
-        # 4. Dynamic Priority Recalculation
+        # 5. Dynamic Priority Recalculation
         effective_sev = incident.get("severity") or 3
         effective_type = incident.get("type") or "other"
         effective_status = update_data.get("status") or incident.get("status") or "reported"

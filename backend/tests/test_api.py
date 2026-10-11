@@ -192,10 +192,10 @@ class IncidentApiSecurityTests(unittest.TestCase):
 
         mock_table = MagicMock()
         mock_table.select.return_value.eq.return_value.execute.return_value.data = [
-            {"id": "inc-500", "user_id": "citizen-1", "status": "assigned", "type": "Flood", "severity": 3, "created_at": "2026-10-02T00:00:00Z"}
+            {"id": "inc-500", "user_id": "citizen-1", "status": "assigned", "assigned_to": "responder-uuid-1", "type": "Flood", "severity": 3, "created_at": "2026-10-02T00:00:00Z"}
         ]
         mock_table.update.return_value.eq.return_value.execute.return_value.data = [
-            {"id": "inc-500", "status": "in_progress", "note": "Unit on scene"}
+            {"id": "inc-500", "status": "in_progress", "assigned_to": "responder-uuid-1", "note": "Unit on scene"}
         ]
         mock_supabase.table.return_value = mock_table
 
@@ -340,10 +340,10 @@ class IncidentApiSecurityTests(unittest.TestCase):
             with self.subTest(status=st):
                 mock_table = MagicMock()
                 mock_table.select.return_value.eq.return_value.execute.return_value.data = [
-                    {"id": "inc-resp", "user_id": "citizen-1", "status": "assigned", "type": "Fire", "severity": 4, "created_at": "2026-10-02T00:00:00Z"}
+                    {"id": "inc-resp", "user_id": "citizen-1", "status": "assigned", "assigned_to": "responder-user-1", "type": "Fire", "severity": 4, "created_at": "2026-10-02T00:00:00Z"}
                 ]
                 mock_table.update.return_value.eq.return_value.execute.return_value.data = [
-                    {"id": "inc-resp", "status": st, "note": f"Field note for {st}"}
+                    {"id": "inc-resp", "status": st, "assigned_to": "responder-user-1", "note": f"Field note for {st}"}
                 ]
                 mock_supabase.table.return_value = mock_table
 
@@ -723,10 +723,10 @@ class IncidentApiSecurityTests(unittest.TestCase):
 
         mock_table = MagicMock()
         mock_table.select.return_value.eq.return_value.execute.return_value.data = [
-            {"id": "inc-1", "status": "assigned", "type": "Fire", "severity": 4, "created_at": "2026-10-02T00:00:00Z"}
+            {"id": "inc-1", "status": "assigned", "assigned_to": "resp-1", "type": "Fire", "severity": 4, "created_at": "2026-10-02T00:00:00Z"}
         ]
         mock_table.update.return_value.eq.return_value.execute.return_value.data = [
-            {"id": "inc-1", "status": "in_progress", "type": "Fire", "severity": 4}
+            {"id": "inc-1", "status": "in_progress", "assigned_to": "resp-1", "type": "Fire", "severity": 4}
         ]
         mock_supabase.table.return_value = mock_table
 
@@ -742,10 +742,10 @@ class IncidentApiSecurityTests(unittest.TestCase):
 
         mock_table = MagicMock()
         mock_table.select.return_value.eq.return_value.execute.return_value.data = [
-            {"id": "inc-1", "status": "in_progress", "type": "Fire", "severity": 4, "created_at": "2026-10-02T00:00:00Z"}
+            {"id": "inc-1", "status": "in_progress", "assigned_to": "resp-1", "type": "Fire", "severity": 4, "created_at": "2026-10-02T00:00:00Z"}
         ]
         mock_table.update.return_value.eq.return_value.execute.return_value.data = [
-            {"id": "inc-1", "status": "resolved", "type": "Fire", "severity": 4}
+            {"id": "inc-1", "status": "resolved", "assigned_to": "resp-1", "type": "Fire", "severity": 4}
         ]
         mock_supabase.table.return_value = mock_table
 
@@ -925,6 +925,302 @@ class IncidentApiSecurityTests(unittest.TestCase):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "healthy")
+
+
+    # ============================================================
+    # 12. Phase 4: Security Hardening & Reliability Regressions
+    # ============================================================
+
+    # --- Issue A: Citizen Incident-List Privacy ---
+    @patch("backend.main.create_client")
+    def test_citizen_receives_only_own_incidents_in_list(self, mock_create_client):
+        """Citizens must only receive incidents matching their user ID in GET /incidents."""
+        cit_user = {"id": "cit-user-123", "role": "citizen", "email": "cit@test.com"}
+        app.dependency_overrides[get_current_user] = lambda: cit_user
+
+        mock_own_incidents = [
+            {"id": "inc-own-1", "user_id": "cit-user-123", "type": "Flood", "severity": 3, "status": "reported", "created_at": "2026-10-02T00:00:00Z"},
+            {"id": "inc-own-2", "user_id": "cit-user-123", "type": "Fire", "severity": 2, "status": "resolved", "created_at": "2026-10-02T01:00:00Z"},
+        ]
+
+        mock_client = MagicMock()
+        mock_query = MagicMock()
+        mock_client.table.return_value = mock_query
+        mock_query.select.return_value = mock_query
+        mock_query.eq.return_value = mock_query
+        mock_query.order.return_value.execute.return_value.data = mock_own_incidents
+        mock_create_client.return_value = mock_client
+
+        response = self.client.get("/incidents")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["count"], 2)
+        self.assertEqual(len(data["incidents"]), 2)
+        mock_query.eq.assert_called_with("user_id", "cit-user-123")
+
+    @patch("backend.main.create_client")
+    def test_operational_roles_receive_all_incidents_in_list(self, mock_create_client):
+        """Operational roles (command_center, admin, responder, hospital, shelter) receive full incident list."""
+        all_incidents = [
+            {"id": "inc-1", "user_id": "cit-1", "type": "Flood", "severity": 3, "status": "reported", "created_at": "2026-10-02T00:00:00Z"},
+            {"id": "inc-2", "user_id": "cit-2", "type": "Fire", "severity": 4, "status": "assigned", "created_at": "2026-10-02T01:00:00Z"},
+        ]
+
+        for op_role in ["command_center", "admin", "responder", "hospital", "shelter"]:
+            with self.subTest(role=op_role):
+                user = {"id": f"{op_role}-uuid", "role": op_role, "email": f"{op_role}@rescue.gov"}
+                app.dependency_overrides[get_current_user] = lambda: user
+
+                mock_client = MagicMock()
+                mock_query = MagicMock()
+                mock_client.table.return_value = mock_query
+                mock_query.select.return_value = mock_query
+                mock_query.order.return_value.execute.return_value.data = all_incidents
+                mock_create_client.return_value = mock_client
+
+                response = self.client.get("/incidents")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["count"], 2)
+                mock_query.eq.assert_not_called()
+
+    # --- Issue B: Hospital and Shelter Permissions ---
+    @patch("backend.main.supabase")
+    def test_hospital_cannot_update_status(self, mock_supabase):
+        """Hospital role cannot modify incident status (403 Forbidden)."""
+        hosp_user = {"id": "hosp-1", "role": "hospital", "email": "hospital@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: hosp_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-1", "user_id": "cit-1", "status": "reported"}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-1", json={"status": "in_progress"})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Hospital and shelter roles do not have permission", response.json()["detail"])
+
+    @patch("backend.main.supabase")
+    def test_hospital_cannot_update_note(self, mock_supabase):
+        """Hospital role cannot modify incident notes (403 Forbidden)."""
+        hosp_user = {"id": "hosp-1", "role": "hospital", "email": "hospital@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: hosp_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-1", "user_id": "cit-1", "status": "reported"}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-1", json={"note": "Hospital note update"})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Hospital and shelter roles do not have permission", response.json()["detail"])
+
+    @patch("backend.main.supabase")
+    def test_shelter_cannot_update_status(self, mock_supabase):
+        """Shelter role cannot modify incident status (403 Forbidden)."""
+        shelter_user = {"id": "shelter-1", "role": "shelter", "email": "shelter@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: shelter_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-1", "user_id": "cit-1", "status": "reported"}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-1", json={"status": "resolved"})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Hospital and shelter roles do not have permission", response.json()["detail"])
+
+    @patch("backend.main.supabase")
+    def test_shelter_cannot_update_note(self, mock_supabase):
+        """Shelter role cannot modify incident notes (403 Forbidden)."""
+        shelter_user = {"id": "shelter-1", "role": "shelter", "email": "shelter@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: shelter_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-1", "user_id": "cit-1", "status": "reported"}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-1", json={"note": "Shelter note update"})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Hospital and shelter roles do not have permission", response.json()["detail"])
+
+    # --- Issue C: Responder Assignment Ownership ---
+    @patch("backend.main.supabase")
+    def test_responder_cannot_update_unassigned_incident(self, mock_supabase):
+        """Responder cannot update status of an unassigned incident (403 Forbidden)."""
+        resp_user = {"id": "resp-uuid-1", "role": "responder", "email": "resp@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: resp_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-unassigned", "user_id": "cit-1", "status": "verified", "assigned_to": None}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-unassigned", json={"status": "in_progress"})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Responders may only update incidents assigned to them", response.json()["detail"])
+
+    @patch("backend.main.supabase")
+    def test_responder_cannot_update_other_responder_incident(self, mock_supabase):
+        """Responder cannot update status of an incident assigned to another responder (403 Forbidden)."""
+        resp_user = {"id": "resp-uuid-1", "role": "responder", "email": "resp@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: resp_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-other", "user_id": "cit-1", "status": "assigned", "assigned_to": "resp-uuid-OTHER"}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-other", json={"status": "in_progress"})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Responders may only update incidents assigned to them", response.json()["detail"])
+
+    @patch("backend.main.supabase")
+    def test_responder_cannot_note_unassigned_incident(self, mock_supabase):
+        """Responder cannot add field notes to an unassigned incident (403 Forbidden)."""
+        resp_user = {"id": "resp-uuid-1", "role": "responder", "email": "resp@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: resp_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-unassigned", "user_id": "cit-1", "status": "verified", "assigned_to": None}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-unassigned", json={"note": "En route note"})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Responders may only update incidents assigned to them", response.json()["detail"])
+
+    @patch("backend.main.supabase")
+    def test_responder_cannot_note_other_responder_incident(self, mock_supabase):
+        """Responder cannot add field notes to an incident assigned to another responder (403 Forbidden)."""
+        resp_user = {"id": "resp-uuid-1", "role": "responder", "email": "resp@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: resp_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-other", "user_id": "cit-1", "status": "assigned", "assigned_to": "resp-uuid-OTHER"}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-other", json={"note": "Unauthorized note"})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Responders may only update incidents assigned to them", response.json()["detail"])
+
+    @patch("backend.main.supabase")
+    def test_responder_can_update_note_on_assigned_incident(self, mock_supabase):
+        """Responder can update note on an incident assigned to them (200 OK)."""
+        resp_user = {"id": "resp-uuid-1", "role": "responder", "email": "resp@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: resp_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-mine", "status": "assigned", "assigned_to": "resp-uuid-1", "type": "Fire", "severity": 3, "created_at": "2026-10-02T00:00:00Z"}
+        ]
+        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-mine", "status": "assigned", "assigned_to": "resp-uuid-1", "note": "On-scene field update", "type": "Fire", "severity": 3}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-mine", json={"note": "On-scene field update"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["incident"]["note"], "On-scene field update")
+
+    # --- Issue D: Assignment Authorization & Note-Only Bypasses ---
+    @patch("backend.main.supabase")
+    def test_citizen_cannot_update_note_on_other_incident(self, mock_supabase):
+        """Citizen cannot update note on another user's incident (403 Forbidden)."""
+        cit_user = {"id": "cit-1", "role": "citizen", "email": "cit1@test.com"}
+        app.dependency_overrides[get_current_user] = lambda: cit_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-other", "user_id": "cit-OTHER", "status": "reported"}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-other", json={"note": "Adversary note"})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("You can only update your own incidents", response.json()["detail"])
+
+    @patch("backend.main.supabase")
+    def test_citizen_can_update_note_on_own_incident(self, mock_supabase):
+        """Citizen can update note on their own incident (200 OK)."""
+        cit_user = {"id": "cit-1", "role": "citizen", "email": "cit1@test.com"}
+        app.dependency_overrides[get_current_user] = lambda: cit_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-own", "user_id": "cit-1", "status": "reported", "type": "Flood", "severity": 2, "created_at": "2026-10-02T00:00:00Z"}
+        ]
+        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-own", "user_id": "cit-1", "status": "reported", "note": "Water level rising", "type": "Flood", "severity": 2}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-own", json={"note": "Water level rising"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["incident"]["note"], "Water level rising")
+
+    @patch("backend.main.supabase")
+    def test_unauthorized_role_cannot_update_note(self, mock_supabase):
+        """Unauthorized role (external_guest) cannot update notes on incidents (403 Forbidden)."""
+        guest_user = {"id": "guest-1", "role": "external_guest", "email": "guest@unknown.com"}
+        app.dependency_overrides[get_current_user] = lambda: guest_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-1", "user_id": "cit-1", "status": "reported"}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-1", json={"note": "Guest note attempt"})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("You do not have permission to update incidents", response.json()["detail"])
+
+    @patch("backend.main.supabase")
+    def test_command_center_can_update_note_on_any_incident(self, mock_supabase):
+        """Command center can update notes on any incident (200 OK)."""
+        cc_user = {"id": "cc-1", "role": "command_center", "email": "cc@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: cc_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-1", "user_id": "cit-99", "status": "reported", "type": "Flood", "severity": 3, "created_at": "2026-10-02T00:00:00Z"}
+        ]
+        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-1", "user_id": "cit-99", "status": "reported", "note": "Command Center dispatched unit 4", "type": "Flood", "severity": 3}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-1", json={"note": "Command Center dispatched unit 4"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["incident"]["note"], "Command Center dispatched unit 4")
+
+    @patch("backend.main.supabase")
+    def test_admin_can_update_note_on_any_incident(self, mock_supabase):
+        """Admin can update notes on any incident (200 OK)."""
+        admin_user = {"id": "admin-1", "role": "admin", "email": "admin@rescue.gov"}
+        app.dependency_overrides[get_current_user] = lambda: admin_user
+
+        mock_table = MagicMock()
+        mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-1", "user_id": "cit-99", "status": "reported", "type": "Fire", "severity": 4, "created_at": "2026-10-02T00:00:00Z"}
+        ]
+        mock_table.update.return_value.eq.return_value.execute.return_value.data = [
+            {"id": "inc-1", "user_id": "cit-99", "status": "reported", "note": "Admin operational audit note", "type": "Fire", "severity": 4}
+        ]
+        mock_supabase.table.return_value = mock_table
+
+        response = self.client.patch("/incidents/inc-1", json={"note": "Admin operational audit note"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["incident"]["note"], "Admin operational audit note")
 
 
 if __name__ == "__main__":
