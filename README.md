@@ -1,186 +1,170 @@
-# 🚨 Smart Disaster Response & Emergency Coordination Platform (AIAC)
+# 🚨 RescueGrid — Smart Disaster Response & Emergency Coordination Platform
 
-> **AI-assisted real-time disaster reporting, prioritization, and emergency coordination platform.**
+> **AI-assisted real-time disaster reporting, prioritization, triage, and multi-role emergency coordination platform.**
 
-AIAC (AI-Assisted Coordination) is a smart disaster response platform designed to connect **citizens, emergency responders, hospitals, shelters, volunteers, and command centers** through a unified system.
+RescueGrid connects **citizens, emergency responders, command center dispatchers, hospital staff, shelter coordinators, and administrators** into a unified, secure, real-time command operations platform.
 
-The platform enables citizens to report emergencies with their location and description, while emergency teams can monitor, prioritize, assign, and manage incidents from a centralized platform.
-
----
-
-## 🎯 Problem Statement
-
-During disasters such as floods, earthquakes, fires, cyclones, and other emergencies, information is often:
-
-- Fragmented across different communication channels
-- Delayed or difficult to verify
-- Difficult to prioritize
-- Poorly coordinated between emergency teams
-- Missing accurate location information
-- Difficult to manage at scale
-
-These problems can lead to delayed response times and inefficient allocation of emergency resources.
+During floods, earthquakes, structural collapses, fires, cyclones, and medical crises, RescueGrid provides sub-second situational awareness, deterministic 1-100 incident priority ranking, MapLibre GIS visualization, and an immutable, transactionally consistent audit history.
 
 ---
 
-## 💡 Proposed Solution
+## 📚 Documentation Index
 
-AIAC provides a unified emergency coordination platform that connects citizens with emergency response teams.
+- **[Production Readiness & Deployment Runbook](docs/PRODUCTION_READINESS.md)** — Cloud hosting (Render/Vercel/Supabase), step-by-step migration guide, environment setup, and operational troubleshooting.
+- **[Security Review & RBAC Architecture](docs/SECURITY_REVIEW.md)** — JWT authentication, 6-role RBAC matrix, Row Level Security, browser write lockdown, and secret sanitization.
+- **[Testing & Reliability Assurance](docs/TESTING.md)** — Comprehensive guide for running the 93 backend unit tests, frontend workflow tests, ESLint, TypeScript verification, and CI quality gates.
 
-The platform follows a complete coordination workflow:
+---
+
+## 🏛️ System Architecture
 
 ```text
-Citizen Emergency Report
-          ↓
-    AI Classification
-          ↓
- Severity & Priority
-          ↓
-   Emergency Queue
-          ↓
- Responder Assignment
-          ↓
-   Live Response Status
-          ↓
-Hospital / Shelter Coordination
-          ↓
-     Command Center
+                               +------------------------------------------+
+                               |              Clients / Web               |
+                               |   Next.js App Router (React 19 / TS)     |
+                               +--------------------+---------------------+
+                                                    |
+                         +--------------------------+--------------------------+
+                         | (REST APIs with JWT)                                | (Direct Supabase SDK:
+                         |                                                     |  Auth + Realtime WS)
+                         v                                                     v
++--------------------------------------------------+        +-----------------------------------+
+|               FastAPI Backend                    |        |         Supabase Platform         |
+|  - Role-based authorization & validation         |        |  - Supabase Auth (GoTrue JWT)     |
+|  - Smart Priority 1-100 deterministic scoring    |        |  - Supabase Realtime (Postgres CDC|
+|  - Sensitive secret metadata sanitization        |        |    WebSocket broadcast)           |
+|  - PostgreSQL Transactional Stored Procedures:   |        +-----------------+-----------------+
+|      * create_incident_with_audit                |                          ^
+|      * update_incident_with_audit                |                          |
++------------------------+-------------------------+                          |
+                         | (Service-Role Connection)                          |
+                         +----------------------------------------------------+
+                                                    |
+                                                    v
+                               +------------------------------------------+
+                               |          Supabase PostgreSQL             |
+                               |  - public.incidents                      |
+                               |  - public.incident_events (Audit log)    |
+                               |  - public.profiles (RBAC & responder dir)|
+                               |  - Row Level Security (RLS) enforcement  |
+                               +------------------------------------------+
 ```
+
+---
+
+## 🎯 Key Capabilities
+
+1. **Deterministic Smart Priority Engine (1–100 Score):**
+   - **Base Severity:** Level 1 (10) to Level 5 (50).
+   - **Hazard Urgency:** Medical Emergency (+25), Building Collapse (+25), Fire (+25), Flood (+15), Cyclone (+15), Earthquake (+15).
+   - **Operational Urgency:** Reported (+15), Verified (+10), Assigned (+5), In Progress (0), Resolved (0).
+   - **Dynamic Aging:** Unassigned and unresolved incidents gain +2 score points per hour of waiting (capped at +10).
+2. **ACID Transactional Auditing:**
+   - Incident creations and updates execute inside PostgreSQL stored procedures (`create_incident_with_audit`, `update_incident_with_audit`).
+   - Incident records and their associated audit events are written atomically. If audit logging fails, the transaction aborts cleanly with no uncommitted state.
+   - Audit metadata recursively redacts sensitive credentials (tokens, passwords, keys).
+3. **Browser Write Lockdown (Phase 5.4):**
+   - Direct browser `INSERT`, `UPDATE`, and `DELETE` privileges on public tables are revoked.
+   - All mutations originate exclusively from the authenticated FastAPI backend via the service role.
+4. **Real-Time Telemetry & Geospatial GIS:**
+   - MapLibre GL with OpenStreetMap raster tiles for instant incident mapping.
+   - Supabase Realtime WebSocket subscriptions push immediate status transitions, assignments, and audit events to command center consoles without manual polling.
 
 ---
 
 ## 🗄️ Database Migrations (Supabase)
 
-RescueGrid uses Supabase PostgreSQL with Row Level Security (RLS) for multi-tenant security and operational coordination.
+RescueGrid uses versioned SQL migrations in `supabase/migrations/`. Apply in chronological order:
 
-### Migration Files
-
-Migrations are located in `supabase/migrations/` and should be applied in chronological order:
-
-1. **`20260906_phase3_auth.sql`**
-   - User profiles (`public.profiles`) with role-based access control (`role` enum: `citizen`, `responder`, `command_center`, `admin`, `hospital`, `shelter`).
-   - Profile trigger on `auth.users` registration.
-2. **`20261002_milestone1_incident_status_and_rls.sql`**
-   - Incident status workflow validation and constraints (`reported`, `verified`, `assigned`, `in_progress`, `resolved`, `cancelled`).
-   - Row Level Security policies for incident creation and status updates.
-3. **`20261002_milestone3_dispatch_and_assignment.sql`**
-   - Adds nullable `incidents.assigned_to` referencing `auth.users(id)` for responder dispatch.
-   - Index `incidents_assigned_to_idx` for dispatch queue performance.
-4. **`20261011_phase5_1_incident_audit_history.sql`**
-   - Creates the append-only `incident_events` table for persistent incident audit logging.
-   - Tracks: `incident_created`, `responder_assigned`, `responder_unassigned`, `status_changed`, `note_added`, `note_updated`.
-   - Immutable security: Direct client `INSERT`, `UPDATE`, and `DELETE` are denied by RLS. Only the trusted backend service role writes events.
-   - Multi-tenant privacy: Citizens can only query audit events for incidents they reported (`incidents.user_id = auth.uid()`); operational roles (`command_center`, `admin`, `responder`, `hospital`, `shelter`) have operational visibility.
-   - High-performance composite indexes on `(incident_id, created_at desc, id desc)` and `actor_id`.
-5. **`20261012_phase5_2_enable_incident_realtime.sql`**
-   - Adds `public.incidents` and `public.incident_events` to the `supabase_realtime` publication.
-   - Enables live websocket coordination for the Emergency Command Center.
-6. **`20261012_phase5_3_audit_integrity_and_retention.sql`**
-   - Audit retention hardening: alters foreign key constraint `incident_events_incident_id_fkey` to `ON DELETE RESTRICT` so that incidents with audit histories cannot be silently destroyed.
-   - Atomic RPC function `public.update_incident_with_audit` executing incident updates and audit event writes in a single ACID PostgreSQL transaction.
-
-### How to Apply Migrations
-
-#### Option A: Supabase Dashboard (Recommended for Managed Cloud)
-1. Open your Supabase Project Dashboard.
-2. Navigate to the **SQL Editor**.
-3. Open each migration file from `supabase/migrations/` in chronological order.
-4. Paste and click **Run**.
-
-#### Option B: Supabase CLI
-```bash
-# Push pending migrations to the linked remote database
-supabase db push
-```
-
----
-
-## 🔒 Audit History API & Security Model (Phase 5)
-
-### Audit Event Types & Semantics
-
-| Event Type | Trigger | Previous State | New State | Metadata |
-|---|---|---|---|---|
-| `incident_created` | Citizen/Operator reports incident | `null` | `{status, type, severity, description, ...}` | `{actor_name, actor_role, action_label}` |
-| `status_changed` | State transition occurs | `{status: old}` | `{status: new}` | `{actor_name, actor_role, action_label}` |
-| `responder_assigned` | Dispatcher assigns responder | `{assigned_to: old}` | `{assigned_to: new, assigned_responder_name}` | `{actor_name, actor_role, assigned_responder_name, action_label}` |
-| `responder_unassigned` | Dispatcher clears assignment | `{assigned_to: old}` | `{assigned_to: null}` | `{actor_name, actor_role, action_label}` |
-| `note_added` | First operational note added | `{note: null}` | `{note: new_note}` | `{actor_name, actor_role, action_label}` |
-| `note_updated` | Existing note updated | `{note: old_note}` | `{note: new_note}` | `{actor_name, actor_role, action_label}` |
-
-- **Actor Provenance**: `actor_id` is derived exclusively from the verified JWT claims (`current_user["id"]`) on the backend. Client payloads cannot spoof or override `actor_id`.
-- **Sensitive Data Scrubbing**: Audit metadata sanitizes all fields, stripping any `token`, `password`, `secret`, `bearer`, `authorization`, or `key` values before persistence.
-- **Compensating Rollbacks**: If writing the audit record fails, compensating transactions immediately delete or revert the incident mutation, guaranteeing that the database never enters an un-audited state.
-- **Query Endpoint**: `GET /incidents/{incident_id}/events`
-  - Deterministic sort: `created_at DESC, id DESC`.
-  - Bounded pagination: `limit` (clamped 1–100, default 50), `offset` (clamped >= 0).
-  - RBAC Enforcement: Unauthorized citizens attempting to query audit events for another citizen's incident receive `403 Forbidden`.
-  - Enriched metadata: Automatically resolves actor display names and operational roles.
+1. `20260906_phase3_auth.sql` — Profiles schema, user triggers, and role enum (`citizen`, `responder`, `command_center`, `admin`, `hospital`, `shelter`).
+2. `20261002_milestone1_incident_status_and_rls.sql` — Incidents schema, lifecycle statuses, base RLS.
+3. `20261002_milestone3_dispatch_and_assignment.sql` — Nullable `incidents.assigned_to` referencing `auth.users(id)` and dispatch index.
+4. `20261011_phase5_1_incident_audit_history.sql` — Append-only `incident_events` table and RLS policies.
+5. `20261012_phase5_2_enable_incident_realtime.sql` — Supabase Realtime publication setup for incidents and events.
+6. `20261012_phase5_3_audit_integrity_and_retention.sql` — `ON DELETE RESTRICT` foreign keys and transactional `update_incident_with_audit` procedure.
+7. `20261012_phase5_4_lock_down_browser_write_privileges.sql` — Revocation of browser client write permissions.
+8. `20261012_phase5_5_optimize_rls_auth_initialization.sql` — Performance optimization for RLS authentication checks.
+9. `20261022_phase6_transactional_note_clear_and_audit.sql` — Explicit note change flags supporting clears (`note_cleared`) and updates.
 
 ---
 
 ## 🛡️ Role-Based Access Control (RBAC) Matrix
 
-| Operation | `citizen` | `responder` | `command_center` | `admin` | `hospital` | `shelter` | Unauthenticated |
-|---|---|---|---|---|---|---|---|
-| `POST /incidents` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ (401) |
-| `GET /incidents` | Own only | All operational | All | All | All operational | All operational | ❌ (401) |
-| `GET /incidents/{id}` | Own only (403 other) | All | All | All | All | All | ❌ (401) |
-| `PATCH /incidents/{id}` (Status) | Cancel own only | Own assigned (`in_progress`, `resolved`) | All valid | All valid | ❌ (403) | ❌ (403) | ❌ (401) |
-| `PATCH /incidents/{id}` (Assign) | ❌ (403) | ❌ (403) | ✅ | ✅ | ❌ (403) | ❌ (403) | ❌ (401) |
-| `PATCH /incidents/{id}` (Note) | Own only | Own assigned only | ✅ | ✅ | ❌ (403) | ❌ (403) | ❌ (401) |
-| `GET /incidents/{id}/events` | Own only (403 other) | All | All | All | All | All | ❌ (401) |
-| `GET /responders` | ❌ (403) | ❌ (403) | ✅ | ✅ | ❌ (403) | ❌ (403) | ❌ (401) |
-| `GET /me` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ (401) |
+| Operation | `citizen` | `responder` | `command_center` | `admin` | `hospital` | `shelter` |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `POST /incidents` | ✅ | ✅ | ✅ | ✅ | ❌ (403) | ❌ (403) |
+| `GET /incidents` | Own only | All | All | All | All | All |
+| `GET /incidents/{id}` | Own only (403 other) | All | All | All | All | All |
+| `PATCH /incidents/{id}` (Status) | Cancel own only | Assigned only (`in_progress`, `resolved`) | All valid | All valid | ❌ (403) | ❌ (403) |
+| `PATCH /incidents/{id}` (Assign) | ❌ (403) | ❌ (403) | ✅ | ✅ | ❌ (403) | ❌ (403) |
+| `PATCH /incidents/{id}` (Note) | Own only | Assigned only | ✅ | ✅ | ❌ (403) | ❌ (403) |
+| `GET /incidents/{id}/events` | Own only (403 other) | All | All | All | All | All |
+| `GET /responders` | ❌ (403) | ❌ (403) | ✅ | ✅ | ❌ (403) | ❌ (403) |
+| `GET /me` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ---
 
-## ⚡ Real-Time Coordination Verification (Phase 5.2)
+## 🚀 Quickstart & Local Development
 
-### Verification Steps
-1. **Enable Realtime Publication**: Run migration `20261012_phase5_2_enable_incident_realtime.sql` on your Supabase database.
-2. **Open Command Center**: Log into the application as a `command_center` or `admin` user and navigate to `/command`.
-3. **Verify Indicator**: Observe the top-right telemetry pill. It displays a green pulsing `LIVE` indicator once the Supabase Realtime channel is connected (`status === "SUBSCRIBED"`).
-4. **Mutate in Another Window**: Report or update an incident in a separate browser window or via the Responder console (`/responder`).
-5. **Observe Realtime Updates**:
-   - The incident queue refreshes automatically without page reload.
-   - If an incident is selected and the **Activity** tab is open, new audit events stream into the timeline instantly.
-   - The geospatial MapLibre map refreshes markers automatically.
-6. **Fallback Mode**: If network connectivity interrupts the websocket connection, the UI automatically falls back to background polling (15s interval) and updates the indicator to `POLL`.
+### 1. Backend Setup
 
----
-
-## ⚙️ Environment Configuration
-
-Ensure the following environment variables are configured (do not commit actual secret keys):
-
-### Backend (`.env` or environment):
-```ini
-SUPABASE_URL=https://<your-project-ref>.supabase.co
-SUPABASE_SECRET_KEY=<your-service-role-secret-key>
-PORT=8000
-```
-
-### Frontend (`frontend/.env.local`):
-```ini
-NEXT_PUBLIC_SUPABASE_URL=https://<your-project-ref>.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=<your-publishable-anon-key>
-NEXT_PUBLIC_API_URL=http://localhost:8000
-```
-
----
-
-## 🧪 Automated Testing
-
-### Backend Unit & Security Test Suite (76 Tests)
 ```bash
-# Run full test suite with virtual environment
-backend\venv\Scripts\python.exe -m unittest discover -s backend/tests -p "test_*.py" -v
+cd backend
+python -m venv venv
+.\venv\Scripts\Activate.ps1    # On Linux/macOS: source venv/bin/activate
+pip install -r requirements.txt
+
+# Configure environment
+cp .env.example .env
+# Fill in SUPABASE_URL and SUPABASE_SECRET_KEY in backend/.env
+
+# Start FastAPI server
+uvicorn main:app --reload --port 8000
 ```
 
-### Frontend Typecheck, Lint & Production Build
+- API Base: `http://localhost:8000`
+- Interactive Swagger Docs: `http://localhost:8000/docs`
+- Health Probe: `http://localhost:8000/health`
+
+### 2. Frontend Setup
+
 ```bash
 cd frontend
-npm run lint
-npm run build
+npm install
+
+# Configure environment
+cp .env.example .env.local
+# Fill in NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+# Start Next.js development server
+npm run dev
+```
+
+- Web UI: `http://localhost:3000`
+- Command Center: `http://localhost:3000/command`
+- Responder Console: `http://localhost:3000/responder`
+
+---
+
+## 🧪 Verification & Testing
+
+### Run All 93 Backend Unit & Security Tests
+```bash
+.\backend\venv\Scripts\python.exe -m unittest discover -s backend/tests -p "test_*.py" -v
+```
+
+### Run Frontend Unit Tests
+```bash
+npm --prefix frontend test
+```
+
+### Run ESLint & Next.js Production Build
+```bash
+npm --prefix frontend run lint
+npm --prefix frontend run build
+```
+
+### Run Git Conflict Marker Check
+```bash
+python scripts/check_conflict_markers.py
 ```
