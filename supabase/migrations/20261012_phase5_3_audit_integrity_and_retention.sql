@@ -156,9 +156,6 @@ $$;
 revoke all on function public.update_incident_with_audit from public, anon, authenticated;
 grant execute on function public.update_incident_with_audit to service_role;
 
-<<<<<<< HEAD
-=======
-
 -- Transactional incident creation + audit event.
 create or replace function public.create_incident_with_audit(
   p_incident jsonb,
@@ -216,4 +213,3 @@ $$;
 
 revoke all on function public.create_incident_with_audit(jsonb, uuid, text, text) from public, anon, authenticated;
 grant execute on function public.create_incident_with_audit(jsonb, uuid, text, text) to service_role;
->>>>>>> 850e5e45eb0fbd8dda8a433e216fd643e6f9a844

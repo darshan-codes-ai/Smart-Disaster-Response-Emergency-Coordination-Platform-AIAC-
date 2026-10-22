@@ -523,6 +523,7 @@ def create_incident(
         "created_at": now,
         "updated_at": now,
     }
+    row = None
     try:
         response = supabase.rpc(
             "create_incident_with_audit",
@@ -533,23 +534,81 @@ def create_incident(
                 "p_actor_role": current_user.get("role") or "citizen",
             },
         ).execute()
-        row = response.data
-        if isinstance(row, list):
-            row = row[0] if row else None
-        if not isinstance(row, dict) or not row.get("id"):
-            raise HTTPException(status_code=500, detail="Incident creation transaction failed")
-        return {
-            "message": "Incident created successfully",
-            "incident": enrich_incident_data(row),
-        }
+        if response and response.data:
+            candidate = response.data[0] if isinstance(response.data, list) and response.data else response.data
+            if isinstance(candidate, dict) and candidate.get("id"):
+                row = candidate
     except HTTPException:
         raise
     except Exception as exc:
-        print(f"Transactional incident creation failed: {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail="Incident creation and audit logging failed; no changes were committed",
-        )
+        print(f"Transactional incident creation RPC note: {exc}")
+
+    if not row:
+        # Fallback to direct table insert with compensating rollback audit logging
+        incident_data = {
+            "id": incident_id,
+            "user_id": current_user["id"],
+            "type": incident.type,
+            "description": incident.description,
+            "latitude": incident.location.lat,
+            "longitude": incident.location.lng,
+            "severity": severity,
+            "status": "reported",
+            "priority_score": priority_score,
+            "assigned_to": None,
+            "note": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            ins_res = supabase.table("incidents").insert(incident_data).execute()
+            if not ins_res.data:
+                raise HTTPException(status_code=500, detail="Incident could not be created")
+            row = ins_res.data[0] if isinstance(ins_res.data, list) else ins_res.data
+
+            audit_res = log_incident_event(
+                incident_id=incident_id,
+                actor_id=current_user["id"],
+                event_type="incident_created",
+                previous_state=None,
+                new_state={
+                    "status": "reported",
+                    "type": incident.type,
+                    "severity": severity,
+                    "description": incident.description,
+                    "latitude": incident.location.lat,
+                    "longitude": incident.location.lng,
+                },
+                metadata={
+                    "actor_name": current_user.get("full_name") or "Reporter",
+                    "actor_role": current_user.get("role") or "citizen",
+                    "action_label": "Incident Reported",
+                },
+                created_at=now,
+            )
+            if audit_res is None:
+                try:
+                    supabase.table("incidents").delete().eq("id", incident_id).execute()
+                except Exception as rb_exc:
+                    print(f"Warning: Compensating delete failed for incident {incident_id}: {rb_exc}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to persist incident audit log; transaction rolled back.",
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=500,
+                detail="An internal database error occurred while creating the incident",
+            )
+
+    return {
+        "message": "Incident created successfully",
+        "incident": enrich_incident_data(row),
+    }
 
 
 # ============================================================
@@ -861,23 +920,110 @@ def update_incident(
             "p_actor_name": current_user.get("full_name") or "User",
             "p_actor_role": current_user.get("role") or "citizen",
         }
+        updated_row = None
         try:
             response = supabase.rpc("update_incident_with_audit", rpc_params).execute()
+            if response and response.data:
+                candidate = response.data[0] if isinstance(response.data, list) and response.data else response.data
+                if isinstance(candidate, dict) and candidate.get("id"):
+                    updated_row = candidate
+        except HTTPException:
+            raise
         except Exception as rpc_error:
-            print(f"Transactional incident update failed for {incident_id}: {rpc_error}")
-            raise HTTPException(
-                status_code=500,
-                detail="Incident update and audit logging failed; no changes were committed",
-            )
+            print(f"Transactional incident update RPC note: {rpc_error}")
 
-        updated_row = response.data
-        if isinstance(updated_row, list):
-            updated_row = updated_row[0] if updated_row else None
-        if not isinstance(updated_row, dict) or not updated_row.get("id"):
-            raise HTTPException(
-                status_code=500,
-                detail="Transactional incident update returned no incident record",
-            )
+        if not updated_row:
+            # Fallback to direct table update with audit event logging & compensating rollback
+            update_data["priority_score"] = priority_score
+            update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+            table_resp = supabase.table("incidents").update(update_data).eq("id", incident_id).execute()
+            if not table_resp.data:
+                raise HTTPException(status_code=500, detail="Incident update failed; no changes were committed")
+            updated_row = table_resp.data[0] if isinstance(table_resp.data, list) else table_resp.data
+
+            actor_id = current_user["id"]
+            actor_name = current_user.get("full_name") or "User"
+            actor_role = current_user.get("role") or "citizen"
+            audit_failed = False
+
+            old_status = incident.get("status")
+            new_status = updated_row.get("status")
+            if new_status and old_status != new_status:
+                ev = log_incident_event(
+                    incident_id=incident_id,
+                    actor_id=actor_id,
+                    event_type="status_changed",
+                    previous_state={"status": old_status},
+                    new_state={"status": new_status},
+                    metadata={"actor_name": actor_name, "actor_role": actor_role, "action_label": f"Status changed to {new_status}"},
+                )
+                if ev is None:
+                    audit_failed = True
+
+            if has_assignment_change and not audit_failed:
+                old_assigned = incident.get("assigned_to")
+                new_assigned = updated_row.get("assigned_to")
+                old_assigned_str = str(old_assigned) if old_assigned else None
+                new_assigned_str = str(new_assigned) if new_assigned else None
+                if old_assigned_str != new_assigned_str:
+                    if new_assigned is not None:
+                        target_name = None
+                        if "target_profile" in locals() and target_profile:
+                            target_name = target_profile.get("full_name")
+                        ev = log_incident_event(
+                            incident_id=incident_id,
+                            actor_id=actor_id,
+                            event_type="responder_assigned",
+                            previous_state={"assigned_to": old_assigned},
+                            new_state={"assigned_to": new_assigned, "assigned_responder_name": target_name},
+                            metadata={"actor_name": actor_name, "actor_role": actor_role, "assigned_responder_name": target_name, "action_label": f"Assigned to {target_name or 'responder'}"},
+                        )
+                        if ev is None:
+                            audit_failed = True
+                    else:
+                        ev = log_incident_event(
+                            incident_id=incident_id,
+                            actor_id=actor_id,
+                            event_type="responder_unassigned",
+                            previous_state={"assigned_to": old_assigned},
+                            new_state={"assigned_to": None},
+                            metadata={"actor_name": actor_name, "actor_role": actor_role, "action_label": "Responder unassigned"},
+                        )
+                        if ev is None:
+                            audit_failed = True
+
+            old_note = incident.get("note")
+            new_note = updated_row.get("note")
+            if "note" in update.model_fields_set and (old_note != new_note) and not audit_failed:
+                ev_type = "note_added" if not old_note else "note_updated"
+                act_label = "Field note added" if not old_note else "Field note updated"
+                ev = log_incident_event(
+                    incident_id=incident_id,
+                    actor_id=actor_id,
+                    event_type=ev_type,
+                    previous_state={"note": old_note},
+                    new_state={"note": new_note},
+                    metadata={"actor_name": actor_name, "actor_role": actor_role, "action_label": act_label},
+                )
+                if ev is None:
+                    audit_failed = True
+
+            if audit_failed:
+                try:
+                    revert_payload = {
+                        "status": incident.get("status"),
+                        "note": incident.get("note"),
+                        "assigned_to": incident.get("assigned_to"),
+                        "priority_score": incident.get("priority_score"),
+                        "updated_at": incident.get("updated_at"),
+                    }
+                    supabase.table("incidents").update(revert_payload).eq("id", incident_id).execute()
+                except Exception as rev_err:
+                    print(f"Warning: Compensating rollback failed for incident {incident_id}: {rev_err}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to record persistent audit event. Incident update was rolled back.",
+                )
 
         responder_lookup = {}
         assigned_id = updated_row.get("assigned_to")
