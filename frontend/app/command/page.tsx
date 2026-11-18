@@ -14,6 +14,7 @@ import {
   getStatusConfig,
   getNextRecommendedStatus,
 } from "../../lib/status-workflow";
+import { getApiBaseUrl } from "../../lib/api-config";
 
 // Dynamic import for MapLibre map component to avoid SSR window issues
 const DisasterMap = dynamic(() => import("../../components/disaster-map"), {
@@ -26,8 +27,6 @@ const DisasterMap = dynamic(() => import("../../components/disaster-map"), {
     </div>
   ),
 });
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 interface Responder {
   id: string;
@@ -217,11 +216,11 @@ export default function CommandCenterPage() {
       const token = await getAccessToken();
       if (!token) return;
 
-      let res = await requestWithToken(`${API_URL}/incidents/${incidentId}/events`, token);
+      let res = await requestWithToken(`${getApiBaseUrl()}/incidents/${incidentId}/events`, token);
       if (res.status === 401) {
         const freshToken = await getAccessToken(true);
         if (freshToken) {
-          res = await requestWithToken(`${API_URL}/incidents/${incidentId}/events`, freshToken);
+          res = await requestWithToken(`${getApiBaseUrl()}/incidents/${incidentId}/events`, freshToken);
         }
       }
 
@@ -286,11 +285,11 @@ export default function CommandCenterPage() {
       const token = await getAccessToken();
       if (!token) return;
 
-      let res = await requestWithToken(`${API_URL}/incidents`, token);
+      let res = await requestWithToken(`${getApiBaseUrl()}/incidents`, token);
       if (res.status === 401) {
         const freshToken = await getAccessToken(true);
         if (freshToken) {
-          res = await requestWithToken(`${API_URL}/incidents`, freshToken);
+          res = await requestWithToken(`${getApiBaseUrl()}/incidents`, freshToken);
         }
       }
 
@@ -334,11 +333,11 @@ export default function CommandCenterPage() {
       const token = await getAccessToken();
       if (!token) return;
 
-      let res = await requestWithToken(`${API_URL}/responders`, token);
+      let res = await requestWithToken(`${getApiBaseUrl()}/responders`, token);
       if (res.status === 401) {
         const freshToken = await getAccessToken(true);
         if (freshToken) {
-          res = await requestWithToken(`${API_URL}/responders`, freshToken);
+          res = await requestWithToken(`${getApiBaseUrl()}/responders`, freshToken);
         }
       }
 
@@ -461,7 +460,7 @@ export default function CommandCenterPage() {
       if (newNote !== undefined) bodyPayload.note = newNote;
       if (assignedTo !== undefined) bodyPayload.assigned_to = assignedTo;
 
-      let res = await requestWithToken(`${API_URL}/incidents/${incidentId}`, token, {
+      let res = await requestWithToken(`${getApiBaseUrl()}/incidents/${incidentId}`, token, {
         method: "PATCH",
         body: JSON.stringify(bodyPayload),
       });
@@ -469,7 +468,7 @@ export default function CommandCenterPage() {
       if (res.status === 401) {
         const freshToken = await getAccessToken(true);
         if (freshToken) {
-          res = await requestWithToken(`${API_URL}/incidents/${incidentId}`, freshToken, {
+          res = await requestWithToken(`${getApiBaseUrl()}/incidents/${incidentId}`, freshToken, {
             method: "PATCH",
             body: JSON.stringify(bodyPayload),
           });
@@ -535,7 +534,7 @@ export default function CommandCenterPage() {
         severity: 4,
       };
 
-      const res = await requestWithToken(`${API_URL}/incidents`, token, {
+      const res = await requestWithToken(`${getApiBaseUrl()}/incidents`, token, {
         method: "POST",
         body: JSON.stringify(payload),
       });
@@ -579,7 +578,7 @@ export default function CommandCenterPage() {
         severity: 3,
       };
 
-      const res = await requestWithToken(`${API_URL}/incidents`, token, {
+      const res = await requestWithToken(`${getApiBaseUrl()}/incidents`, token, {
         method: "POST",
         body: JSON.stringify(payload),
       });

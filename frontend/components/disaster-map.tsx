@@ -2,7 +2,8 @@
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import * as maplibregl from "maplibre-gl";
-import { getAccessToken } from "../lib/supabase/access-token";
+import { getAccessToken, requestWithToken } from "../lib/supabase/access-token";
+import { getApiBaseUrl } from "../lib/api-config";
 
 export interface Incident {
   id: string;
@@ -36,7 +37,6 @@ export interface DisasterMapProps {
 // Fallback center coordinates (Telangana / Warangal area where initial incidents are located)
 const DEFAULT_CENTER: [number, number] = [79.4687, 18.0873];
 const DEFAULT_ZOOM = 12;
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 // Severity metadata config
 interface SeverityConfig {
@@ -161,12 +161,8 @@ export default function DisasterMap({
     async () => {
       try {
         const requestIncidents = async (accessToken: string) => {
-          return fetch(`${API_URL}/incidents`, {
+          return requestWithToken(`${getApiBaseUrl()}/incidents`, accessToken, {
             method: "GET",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${accessToken}`,
-            },
           });
         };
 
@@ -215,8 +211,13 @@ export default function DisasterMap({
       } catch (err) {
         console.error("DisasterMap fetch error:", err);
         if (isMountedRef.current) {
+          const isNetworkError =
+            err instanceof TypeError &&
+            (err.message.includes("fetch") || err.message.includes("Failed") || err.message.includes("network"));
           setErrorMessage(
-            err instanceof Error
+            isNetworkError
+              ? `Unable to connect to incident backend at ${getApiBaseUrl()}. Please verify the FastAPI backend is running.`
+              : err instanceof Error
               ? err.message
               : "Unable to connect to incident backend. Please check connection."
           );

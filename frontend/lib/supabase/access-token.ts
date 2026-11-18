@@ -1,6 +1,7 @@
 "use client";
 
 import { createClient } from "./client";
+import { getAlternateApiUrl, setApiBaseUrl } from "../api-config";
 
 // Keep one browser auth client for the lifetime of this module. Multiple
 // browser clients can race while rotating the same Supabase refresh token.
@@ -97,5 +98,32 @@ export async function requestWithToken(
   headers.set("Content-Type", "application/json");
   headers.set("Authorization", `Bearer ${accessToken}`);
 
-  return fetch(url, { ...init, headers });
+  try {
+    return await fetch(url, { ...init, headers });
+  } catch (err: unknown) {
+    // If connection refused or network failure, attempt fallback to alternate port (8010 <-> 8000)
+    const isNetworkError =
+      err instanceof TypeError &&
+      (err.message.includes("fetch") || err.message.includes("network") || err.message.includes("Failed"));
+
+    if (isNetworkError) {
+      const altOrigin = getAlternateApiUrl(url);
+      if (altOrigin) {
+        try {
+          const parsed = new URL(url);
+          const altUrl = `${altOrigin}${parsed.pathname}${parsed.search}`;
+          const retryRes = await fetch(altUrl, { ...init, headers });
+          if (retryRes) {
+            setApiBaseUrl(altOrigin);
+            return retryRes;
+          }
+        } catch {
+          // Fallback port also unreachable, proceed to throw with descriptive error
+        }
+      }
+      throw new Error(`Unable to connect to backend at ${url}. Please verify the FastAPI backend is running.`);
+    }
+
+    throw err;
+  }
 }

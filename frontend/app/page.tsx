@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { getAccessToken, requestWithToken } from "../lib/supabase/access-token";
 import { useCurrentUser } from "../lib/supabase/use-current-user";
+import { getApiBaseUrl } from "../lib/api-config";
 import type { Incident } from "../components/disaster-map";
 import Navbar from "../components/navbar";
 import StatusBadge from "../components/status-badge";
@@ -133,7 +134,7 @@ export default function Home() {
       };
 
       const submitIncident = (token: string) =>
-        requestWithToken(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/incidents`, token, {
+        requestWithToken(`${getApiBaseUrl()}/incidents`, token, {
           method: "POST",
           body: JSON.stringify(payload),
         });
@@ -179,8 +180,15 @@ export default function Home() {
         "Incident reporting error:",
         err instanceof Error ? err.message : err
       );
+      const isNetworkError =
+        err instanceof TypeError &&
+        (err.message.includes("fetch") || err.message.includes("Failed") || err.message.includes("network"));
       setErrorMessage(
-        err instanceof Error ? err.message : "Failed to record incident"
+        isNetworkError
+          ? `Unable to connect to emergency dispatch server at ${getApiBaseUrl()}. Please verify the FastAPI backend is running.`
+          : err instanceof Error
+          ? err.message
+          : "Failed to record incident"
       );
     } finally {
       setSubmitting(false);

@@ -2,12 +2,17 @@
 
 import { useEffect } from "react";
 import { getAccessToken } from "../lib/supabase/access-token";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import {
+  getApiBaseUrl,
+  isBackendApiUrl,
+  getAlternateApiUrl,
+  setApiBaseUrl,
+} from "../lib/api-config";
 
 /**
  * Adds the current Supabase access token to browser requests sent to FastAPI.
- * This keeps the existing dashboard code compatible with the authenticated API.
+ * This keeps the existing dashboard code compatible with the authenticated API
+ * while providing port fallback between 8010 and 8000.
  */
 export default function ApiAuthProvider() {
   useEffect(() => {
@@ -21,7 +26,7 @@ export default function ApiAuthProvider() {
             ? input.toString()
             : input.url;
 
-      if (!requestUrl.startsWith(API_URL)) {
+      if (!isBackendApiUrl(requestUrl)) {
         return originalFetch(input, init);
       }
 
@@ -39,10 +44,47 @@ export default function ApiAuthProvider() {
         }
       }
 
-      return originalFetch(input, {
-        ...init,
-        headers,
-      });
+      try {
+        return await originalFetch(input, {
+          ...init,
+          headers,
+        });
+      } catch (err: unknown) {
+        const isNetworkErr =
+          err instanceof TypeError &&
+          (err.message.includes("fetch") ||
+            err.message.includes("network") ||
+            err.message.includes("Failed"));
+
+        if (isNetworkErr) {
+          const altOrigin = getAlternateApiUrl(requestUrl);
+          if (altOrigin) {
+            try {
+              const parsed = new URL(requestUrl, getApiBaseUrl());
+              const altUrl = `${altOrigin}${parsed.pathname}${parsed.search}`;
+              const altInput =
+                typeof input === "string" ? altUrl : new Request(altUrl, init);
+              const retryRes = await originalFetch(altInput, {
+                ...init,
+                headers,
+              });
+              if (retryRes) {
+                setApiBaseUrl(altOrigin);
+                return retryRes;
+              }
+            } catch {
+              // Both ports unreachable
+            }
+          }
+          console.error(
+            `[ApiAuthProvider] Network error contacting backend at ${requestUrl}. Check if FastAPI is running on ${getApiBaseUrl()}`
+          );
+          throw new Error(
+            `Unable to connect to backend at ${requestUrl}. Please verify the FastAPI backend is running.`
+          );
+        }
+        throw err;
+      }
     };
 
     return () => {

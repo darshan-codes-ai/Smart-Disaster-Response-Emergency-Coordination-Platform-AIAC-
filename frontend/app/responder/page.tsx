@@ -5,11 +5,10 @@ import Link from "next/link";
 import type { Incident } from "../../components/disaster-map";
 import { getAccessToken, requestWithToken } from "../../lib/supabase/access-token";
 import { useCurrentUser } from "../../lib/supabase/use-current-user";
+import { getApiBaseUrl } from "../../lib/api-config";
 import Navbar from "../../components/navbar";
 import StatusBadge from "../../components/status-badge";
 import SeverityBadge from "../../components/severity-badge";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 function getTypeIcon(type: string): string {
   const t = (type || "").toLowerCase();
@@ -68,11 +67,11 @@ export default function ResponderPage() {
         throw new Error("Your login session has expired. Please log in again.");
       }
 
-      let res = await requestWithToken(`${API_URL}/incidents`, token);
+      let res = await requestWithToken(`${getApiBaseUrl()}/incidents`, token);
       if (res.status === 401) {
         const freshToken = await getAccessToken(true);
         if (freshToken) {
-          res = await requestWithToken(`${API_URL}/incidents`, freshToken);
+          res = await requestWithToken(`${getApiBaseUrl()}/incidents`, freshToken);
         }
       }
 
@@ -129,7 +128,7 @@ export default function ResponderPage() {
       if (newStatus !== undefined) bodyPayload.status = newStatus;
       if (newNote !== undefined) bodyPayload.note = newNote;
 
-      let res = await requestWithToken(`${API_URL}/incidents/${incidentId}`, token, {
+      let res = await requestWithToken(`${getApiBaseUrl()}/incidents/${incidentId}`, token, {
         method: "PATCH",
         body: JSON.stringify(bodyPayload),
       });
@@ -137,7 +136,7 @@ export default function ResponderPage() {
       if (res.status === 401) {
         const freshToken = await getAccessToken(true);
         if (freshToken) {
-          res = await requestWithToken(`${API_URL}/incidents/${incidentId}`, freshToken, {
+          res = await requestWithToken(`${getApiBaseUrl()}/incidents/${incidentId}`, freshToken, {
             method: "PATCH",
             body: JSON.stringify(bodyPayload),
           });

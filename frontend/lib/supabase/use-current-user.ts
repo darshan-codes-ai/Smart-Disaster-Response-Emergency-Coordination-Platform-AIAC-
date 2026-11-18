@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { createClient } from "./client";
 import { getAccessToken, requestWithToken } from "./access-token";
+import { getApiBaseUrl } from "../api-config";
 
 export interface UserProfile {
   id: string;
@@ -10,8 +11,6 @@ export interface UserProfile {
   role: "citizen" | "responder" | "hospital" | "shelter" | "command_center" | "admin" | string;
   full_name: string | null;
 }
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export function useCurrentUser() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
@@ -44,11 +43,11 @@ export function useCurrentUser() {
         return;
       }
 
-      let res = await requestWithToken(`${API_URL}/me`, token);
+      let res = await requestWithToken(`${getApiBaseUrl()}/me`, token);
       if (res.status === 401) {
         const freshToken = await getAccessToken(true);
         if (freshToken) {
-          res = await requestWithToken(`${API_URL}/me`, freshToken);
+          res = await requestWithToken(`${getApiBaseUrl()}/me`, freshToken);
         }
       }
 
